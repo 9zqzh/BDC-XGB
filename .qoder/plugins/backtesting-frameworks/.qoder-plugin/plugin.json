@@ -1,0 +1,17 @@
+{
+  "name": "backtesting-frameworks",
+  "displayName": "Backtesting Frameworks",
+  "version": "0.1.0",
+  "description": "Build robust backtesting systems for trading strategies with proper handling of look-ahead bias, survivorship bias, and transaction costs.",
+  "descriptionZh": "构建稳健的交易策略回测系统，正确处理前视偏差、幸存者偏差和交易成本。",
+  "author": {
+    "name": "wshobson"
+  },
+  "homepage": "https://github.com/wshobson/agents",
+  "repository": "https://github.com/wshobson/agents",
+  "logo": "./assets/logo.svg",
+  "keywords": ["qoder-plugin", "skill", "backtesting", "trading", "quantitative"],
+  "category": "developer-tools",
+  "tags": ["skill", "trading", "backtesting", "quantitative"],
+  "skills": "./skills/"
+}

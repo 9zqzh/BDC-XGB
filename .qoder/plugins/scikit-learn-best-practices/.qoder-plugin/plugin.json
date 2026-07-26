@@ -1,0 +1,17 @@
+{
+  "name": "scikit-learn-best-practices",
+  "displayName": "Scikit-learn Best Practices",
+  "version": "0.1.0",
+  "description": "Best practices for scikit-learn machine learning, model development, evaluation, and deployment in Python.",
+  "descriptionZh": "Scikit-learn 机器学习最佳实践，包括模型开发、评估和部署的 Python 指南。",
+  "author": {
+    "name": "mindrally"
+  },
+  "homepage": "https://github.com/mindrally/skills",
+  "repository": "https://github.com/mindrally/skills",
+  "logo": "./assets/logo.svg",
+  "keywords": ["qoder-plugin", "skill", "scikit-learn", "machine-learning", "python"],
+  "category": "developer-tools",
+  "tags": ["skill", "machine-learning", "python"],
+  "skills": "./skills/"
+}

@@ -1,0 +1,17 @@
+{
+  "name": "model-hyperparameter-tuning",
+  "displayName": "Model Hyperparameter Tuning",
+  "version": "0.1.0",
+  "description": "Systematic approach to hyperparameter tuning including grid search, random search, Bayesian optimization, and best practices for model performance optimization.",
+  "descriptionZh": "超参数调优的系统方法，包括网格搜索、随机搜索、贝叶斯优化和模型性能优化最佳实践。",
+  "author": {
+    "name": "aj-geddes"
+  },
+  "homepage": "https://github.com/aj-geddes/useful-ai-prompts",
+  "repository": "https://github.com/aj-geddes/useful-ai-prompts",
+  "logo": "./assets/logo.svg",
+  "keywords": ["qoder-plugin", "skill", "hyperparameter-tuning", "machine-learning", "optimization"],
+  "category": "developer-tools",
+  "tags": ["skill", "machine-learning", "optimization"],
+  "skills": "./skills/"
+}

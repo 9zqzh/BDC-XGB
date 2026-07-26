@@ -1,0 +1,17 @@
+{
+  "name": "mle-workflow",
+  "displayName": "MLE Workflow",
+  "version": "0.1.0",
+  "description": "Machine Learning Engineer workflow best practices including data preparation, model development, evaluation, and production deployment guidance.",
+  "descriptionZh": "机器学习工程师工作流最佳实践，包括数据准备、模型开发、评估和生产部署指导。",
+  "author": {
+    "name": "affaan-m"
+  },
+  "homepage": "https://github.com/affaan-m/everything-claude-code",
+  "repository": "https://github.com/affaan-m/everything-claude-code",
+  "logo": "./assets/logo.svg",
+  "keywords": ["qoder-plugin", "skill", "machine-learning", "mle", "workflow"],
+  "category": "developer-tools",
+  "tags": ["skill", "machine-learning"],
+  "skills": "./skills/"
+}

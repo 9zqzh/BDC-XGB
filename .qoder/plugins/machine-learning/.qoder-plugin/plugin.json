@@ -1,0 +1,17 @@
+{
+  "name": "machine-learning",
+  "displayName": "Machine Learning with JAX",
+  "version": "0.1.0",
+  "description": "Machine learning development with JAX, functional programming patterns, and high-performance computing.",
+  "descriptionZh": "使用 JAX 进行机器学习开发，包括函数式编程模式和高性能计算。",
+  "author": {
+    "name": "mindrally"
+  },
+  "homepage": "https://github.com/mindrally/skills",
+  "repository": "https://github.com/mindrally/skills",
+  "logo": "./assets/logo.svg",
+  "keywords": ["qoder-plugin", "skill", "jax", "machine-learning", "functional-programming"],
+  "category": "developer-tools",
+  "tags": ["skill", "machine-learning", "jax"],
+  "skills": "./skills/"
+}
