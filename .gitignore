@@ -17,5 +17,10 @@ wheels/
 
 *.zip
 
-*.tar
+# memmap temp files
+model/**/tmp*.dat
+
+# Legacy scripts (PyTorch era)
+code/src/lr_search.py
+code/src/optuna_search.py
 

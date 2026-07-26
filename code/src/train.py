@@ -1,67 +1,107 @@
-import pandas as pd
-import numpy as np
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader
-from sklearn.preprocessing import StandardScaler
-from tqdm import tqdm
-from tensorboardX import SummaryWriter
-from config import config, config_extended
-from model import StockTransformer
-from utils import engineer_features_39, engineer_features_158plus39
-from utils import create_ranking_dataset_vectorized
-from evaluation import calculate_extended_metrics, format_eval_report
-from early_stopping import NoiseAwareEarlyStopping
-import joblib
+"""
+XGBRanker 排序学习训练脚本
+标签：超额收益（已由 _build_label_and_clean 计算）
+特征：将 60 天序列展平为单行特征向量（60 × 197 = 11,820 维）
+分组：每个交易日为一个 group（qid），group 内股票按超额收益排序
+"""
+
 import os
 import json
-import multiprocessing as mp
 import random
+import multiprocessing as mp
+
+import numpy as np
+import pandas as pd
+import joblib
+import xgboost as xgb
+from sklearn.preprocessing import StandardScaler
+from tqdm import tqdm
+
+from config import config, config_extended, xgb_config
+from utils import engineer_features_39, engineer_features_158plus39
+from evaluation import calculate_extended_metrics, format_eval_report
+
+
+# ============================================================
+#  特征列映射 & 特征工程（复用 utils.py，不修改特征逻辑）
+# ============================================================
+
+feature_columns_map = {
+    '39': [
+        'instrument', '开盘', '收盘', '最高', '最低', '成交量', '成交额', '振幅', '涨跌额', '换手率', '涨跌幅',
+        'sma_5', 'sma_20', 'ema_12', 'ema_26', 'rsi', 'macd', 'macd_signal', 'volume_change', 'obv',
+        'volume_ma_5', 'volume_ma_20', 'volume_ratio', 'kdj_k', 'kdj_d', 'kdj_j', 'boll_mid', 'boll_std',
+        'atr_14', 'ema_60', 'volatility_10', 'volatility_20', 'return_1', 'return_5', 'return_10',
+        'high_low_spread', 'open_close_spread', 'high_close_spread', 'low_close_spread'
+    ],
+    '158+39': [
+        'instrument', '开盘', '收盘', '最高', '最低', '成交量', '成交额', '振幅', '涨跌额', '换手率', '涨跌幅',
+        'KMID', 'KLEN', 'KMID2', 'KUP', 'KUP2', 'KLOW', 'KLOW2', 'KSFT', 'KSFT2', 'OPEN0', 'HIGH0', 'LOW0',
+        'VWAP0', 'ROC5', 'ROC10', 'ROC20', 'ROC30', 'ROC60', 'MA5', 'MA10', 'MA20', 'MA30', 'MA60', 'STD5',
+        'STD10', 'STD20', 'STD30', 'STD60', 'BETA5', 'BETA10', 'BETA20', 'BETA30', 'BETA60', 'RSQR5', 'RSQR10',
+        'RSQR20', 'RSQR30', 'RSQR60', 'RESI5', 'RESI10', 'RESI20', 'RESI30', 'RESI60', 'MAX5', 'MAX10', 'MAX20',
+        'MAX30', 'MAX60', 'MIN5', 'MIN10', 'MIN20', 'MIN30', 'MIN60', 'QTLU5', 'QTLU10', 'QTLU20', 'QTLU30',
+        'QTLU60', 'QTLD5', 'QTLD10', 'QTLD20', 'QTLD30', 'QTLD60', 'RANK5', 'RANK10', 'RANK20', 'RANK30',
+        'RANK60', 'RSV5', 'RSV10', 'RSV20', 'RSV30', 'RSV60', 'IMAX5', 'IMAX10', 'IMAX20', 'IMAX30', 'IMAX60',
+        'IMIN5', 'IMIN10', 'IMIN20', 'IMIN30', 'IMIN60', 'IMXD5', 'IMXD10', 'IMXD20', 'IMXD30', 'IMXD60',
+        'CORR5', 'CORR10', 'CORR20', 'CORR30', 'CORR60', 'CORD5', 'CORD10', 'CORD20', 'CORD30', 'CORD60',
+        'CNTP5', 'CNTP10', 'CNTP20', 'CNTP30', 'CNTP60', 'CNTN5', 'CNTN10', 'CNTN20', 'CNTN30', 'CNTN60',
+        'CNTD5', 'CNTD10', 'CNTD20', 'CNTD30', 'CNTD60', 'SUMP5', 'SUMP10', 'SUMP20', 'SUMP30', 'SUMP60',
+        'SUMN5', 'SUMN10', 'SUMN20', 'SUMN30', 'SUMN60', 'SUMD5', 'SUMD10', 'SUMD20', 'SUMD30', 'SUMD60',
+        'VMA5', 'VMA10', 'VMA20', 'VMA30', 'VMA60', 'VSTD5', 'VSTD10', 'VSTD20', 'VSTD30', 'VSTD60', 'WVMA5',
+        'WVMA10', 'WVMA20', 'WVMA30', 'WVMA60', 'VSUMP5', 'VSUMP10', 'VSUMP20', 'VSUMP30', 'VSUMP60', 'VSUMN5',
+        'VSUMN10', 'VSUMN20', 'VSUMN30', 'VSUMN60', 'VSUMD5', 'VSUMD10', 'VSUMD20', 'VSUMD30', 'VSUMD60',
+        'sma_5', 'sma_20', 'ema_12', 'ema_26', 'rsi', 'macd', 'macd_signal', 'volume_change', 'obv',
+        'volume_ma_5', 'volume_ma_20', 'volume_ratio', 'kdj_k', 'kdj_d', 'kdj_j', 'boll_mid', 'boll_std',
+        'atr_14', 'ema_60', 'volatility_10', 'volatility_20', 'return_1', 'return_5', 'return_10',
+        'high_low_spread', 'open_close_spread', 'high_close_spread', 'low_close_spread'
+    ],
+}
+
+feature_engineer_func_map = {
+    '39': engineer_features_39,
+    '158+39': engineer_features_158plus39,
+}
+
+
 def set_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
-    os.environ['PYTHONHASHSEED'] = str(seed)
 
-feature_cloums_map = {
-    '39': ['instrument','开盘', '收盘', '最高', '最低', '成交量', '成交额', '振幅', '涨跌额', '换手率', '涨跌幅','sma_5', 'sma_20', 'ema_12', 'ema_26', 'rsi', 'macd', 'macd_signal', 'volume_change', 'obv','volume_ma_5', 'volume_ma_20', 'volume_ratio', 'kdj_k', 'kdj_d', 'kdj_j', 'boll_mid', 'boll_std', 'atr_14', 'ema_60', 'volatility_10', 'volatility_20', 'return_1', 'return_5', 'return_10',  'high_low_spread', 'open_close_spread', 'high_close_spread', 'low_close_spread'],
 
-    '158+39': ['instrument','开盘', '收盘', '最高', '最低', '成交量', '成交额', '振幅', '涨跌额', '换手率', '涨跌幅','KMID', 'KLEN', 'KMID2', 'KUP', 'KUP2', 'KLOW', 'KLOW2', 'KSFT', 'KSFT2', 'OPEN0', 'HIGH0', 'LOW0', 'VWAP0', 'ROC5', 'ROC10', 'ROC20', 'ROC30', 'ROC60', 'MA5', 'MA10', 'MA20', 'MA30', 'MA60', 'STD5', 'STD10', 'STD20', 'STD30', 'STD60', 'BETA5', 'BETA10', 'BETA20', 'BETA30', 'BETA60', 'RSQR5', 'RSQR10', 'RSQR20', 'RSQR30', 'RSQR60', 'RESI5', 'RESI10', 'RESI20', 'RESI30', 'RESI60', 'MAX5', 'MAX10', 'MAX20', 'MAX30', 'MAX60', 'MIN5', 'MIN10', 'MIN20', 'MIN30', 'MIN60', 'QTLU5', 'QTLU10', 'QTLU20', 'QTLU30', 'QTLU60', 'QTLD5', 'QTLD10', 'QTLD20', 'QTLD30', 'QTLD60', 'RANK5', 'RANK10', 'RANK20', 'RANK30', 'RANK60', 'RSV5', 'RSV10', 'RSV20', 'RSV30', 'RSV60', 'IMAX5', 'IMAX10', 'IMAX20', 'IMAX30', 'IMAX60', 'IMIN5', 'IMIN10', 'IMIN20', 'IMIN30', 'IMIN60', 'IMXD5', 'IMXD10', 'IMXD20', 'IMXD30', 'IMXD60', 'CORR5', 'CORR10', 'CORR20', 'CORR30', 'CORR60', 'CORD5', 'CORD10', 'CORD20', 'CORD30', 'CORD60', 'CNTP5', 'CNTP10', 'CNTP20', 'CNTP30', 'CNTP60', 'CNTN5', 'CNTN10', 'CNTN20', 'CNTN30', 'CNTN60', 'CNTD5', 'CNTD10', 'CNTD20', 'CNTD30', 'CNTD60', 'SUMP5', 'SUMP10', 'SUMP20', 'SUMP30', 'SUMP60', 'SUMN5', 'SUMN10', 'SUMN20', 'SUMN30', 'SUMN60', 'SUMD5', 'SUMD10', 'SUMD20', 'SUMD30', 'SUMD60', 'VMA5', 'VMA10', 'VMA20', 'VMA30', 'VMA60', 'VSTD5', 'VSTD10', 'VSTD20', 'VSTD30', 'VSTD60', 'WVMA5', 'WVMA10', 'WVMA20', 'WVMA30', 'WVMA60', 'VSUMP5', 'VSUMP10', 'VSUMP20', 'VSUMP30', 'VSUMP60', 'VSUMN5', 'VSUMN10', 'VSUMN20', 'VSUMN30', 'VSUMN60', 'VSUMD5', 'VSUMD10', 'VSUMD20', 'VSUMD30', 'VSUMD60','sma_5', 'sma_20', 'ema_12', 'ema_26', 'rsi', 'macd', 'macd_signal', 'volume_change', 'obv', 'volume_ma_5', 'volume_ma_20', 'volume_ratio', 'kdj_k', 'kdj_d', 'kdj_j', 'boll_mid', 'boll_std', 'atr_14', 'ema_60', 'volatility_10', 'volatility_20', 'return_1', 'return_5', 'return_10',  'high_low_spread', 'open_close_spread', 'high_close_spread', 'low_close_spread']
-}
-feature_engineer_func_map = {
-    '39': engineer_features_39,
-    '158+39': engineer_features_158plus39
-}
-
+# ============================================================
+#  标签构建：超额收益（不改计算逻辑）
+# ============================================================
 
 def _build_label_and_clean(processed, drop_small_open=True):
-    """统一构建标签并清洗无效样本。"""
+    """构建超额收益标签并清洗无效样本。"""
     processed['open_t1'] = processed.groupby('股票代码')['开盘'].shift(-1)
     processed['open_t5'] = processed.groupby('股票代码')['开盘'].shift(-5)
 
-    # 过滤无效开盘价，避免收益率极端爆炸
     if drop_small_open:
         processed = processed[processed['open_t1'] > 1e-4]
 
     processed['label'] = (processed['open_t5'] - processed['open_t1']) / (processed['open_t1'] + 1e-12)
-    processed = processed.dropna(subset=['label'])
 
+    # 转换为超额收益：减去当日等权指数收益
+    processed['_daily_mean'] = processed.groupby('日期')['label'].transform('mean')
+    processed['label'] = processed['label'] - processed['_daily_mean']
+    processed.drop(columns=['_daily_mean'], inplace=True)
+
+    processed = processed.dropna(subset=['label'])
     processed.drop(columns=['open_t1', 'open_t5'], inplace=True)
     return processed
 
 
-def _preprocess_common(df, stockid2idx, desc, drop_small_open=True):
-    assert config['feature_num'] in feature_engineer_func_map, f"Unsupported feature_num: {config['feature_num']}"
-    assert stockid2idx is not None, "stockid2idx 不能为空"
-    feature_engineer = feature_engineer_func_map[config['feature_num']]
-    feature_columns = feature_cloums_map[config['feature_num']]
+# ============================================================
+#  数据预处理（复用 utils.py 特征工程）
+# ============================================================
 
-    # 保证时序正确，避免 shift 标签错位
+def _preprocess_common(df, stockid2idx, desc, drop_small_open=True):
+    assert config['feature_num'] in feature_engineer_func_map
+    feature_engineer = feature_engineer_func_map[config['feature_num']]
+    feature_columns = feature_columns_map[config['feature_num']]
+
     df = df.copy()
     df = df.sort_values(['股票代码', '日期']).reset_index(drop=True)
 
@@ -75,8 +115,6 @@ def _preprocess_common(df, stockid2idx, desc, drop_small_open=True):
         processed_list = list(tqdm(pool.imap(feature_engineer, groups), total=len(groups), desc=desc))
 
     processed = pd.concat(processed_list).reset_index(drop=True)
-
-    # 映射股票索引，并剔除映射失败样本
     processed['instrument'] = processed['股票代码'].map(stockid2idx)
     processed = processed.dropna(subset=['instrument']).copy()
     processed['instrument'] = processed['instrument'].astype(np.int64)
@@ -85,7 +123,6 @@ def _preprocess_common(df, stockid2idx, desc, drop_small_open=True):
     return processed, feature_columns
 
 
-# 数据预处理函数
 def preprocess_data(df, is_train=True, stockid2idx=None):
     if not is_train:
         return _preprocess_common(df, stockid2idx, desc="特征工程", drop_small_open=False)
@@ -93,488 +130,124 @@ def preprocess_data(df, is_train=True, stockid2idx=None):
 
 
 def preprocess_val_data(df, stockid2idx=None):
-    # 验证集与训练集保持同口径，避免 label 分布漂移
     return _preprocess_common(df, stockid2idx, desc="验证集特征工程", drop_small_open=True)
 
 
-# 加权的排序损失函数
-class WeightedRankingLoss(nn.Module):
+# ============================================================
+#  特征展平：60 天序列 → 单行向量（XGBRanker 输入）
+# ============================================================
+
+def flatten_sequences_to_xgb(data, features, sequence_length, flatten_days=None):
     """
-    组合的加权排序损失函数，着重强调top-k的样本。
+    将时序 DataFrame 转换为 XGBRanker 需要的扁平特征矩阵。
+
+    - 历史窗口 = sequence_length (60天，确保上下文)
+    - 展平窗口 = flatten_days (默认10天，控制特征维度)
+    - 附加市场状态特征（全局均值、波动率、趋势）
     """
-    def __init__(self, temperature=1.0, k=5, weight_factor=2.0, pairwise_weight=1, base_weight=1.0):
-        super(WeightedRankingLoss, self).__init__()
-        self.temperature = temperature
-        self.k = k
-        self.weight_factor = weight_factor
-        self.pairwise_weight = pairwise_weight
-        self.base_weight = base_weight
+    import tempfile
 
-    def listwise_loss(self, y_pred, y_true, weights):
-        """加权的Listwise损失 (KL散度 + Cross Entropy)"""
-        
-        pred_probs = F.softmax(y_pred / self.temperature, dim=1)
-        target_probs = F.softmax(y_true / self.temperature, dim=1)
+    if flatten_days is None:
+        flatten_days = config.get('xgb_flatten_days', 10)
+    flatten_days = min(flatten_days, sequence_length)
 
-        # 加权 Cross Entropy（原实现未使用 weights）
-        weighted_ce = -(target_probs * torch.log(pred_probs + 1e-12) * weights)
-        ce_loss = (weighted_ce.sum(dim=1) / (weights.sum(dim=1) + 1e-12)).mean()
-        
-        return ce_loss
+    data = data.copy()
+    data['日期'] = pd.to_datetime(data['日期'])
+    data = data.sort_values(['instrument', '日期']).reset_index(drop=True)
+    data = data.dropna(subset=['label'])
 
-    def pairwise_loss(self, y_pred, y_true, weights):
-        """加权的Pairwise损失"""
-        batch_size, num_items = y_pred.size()
-        
-        pred_diff = y_pred.unsqueeze(2) - y_pred.unsqueeze(1)
-        true_diff = y_true.unsqueeze(2) - y_true.unsqueeze(1)
-        
-        # 只考虑真实标签不同的项目对
-        mask = (true_diff != 0).float()
-        
-        # 创建权重矩阵
-        # 如果一对(i, j)中，i或j是关键样本，则权重更高
-        weight_matrix = weights.unsqueeze(2) + weights.unsqueeze(1)
-        # weight_matrix = torch.where(weight_matrix > 2.0, self.weight_factor, 1.0)
-        
-        pairwise_loss = torch.sigmoid(-pred_diff * torch.sign(true_diff))
-        
-        # 应用mask和权重
-        weighted_loss = pairwise_loss * mask * weight_matrix
-        
-        num_pairs = mask.sum(dim=[1, 2]).clamp(min=1)
-        loss = (weighted_loss.sum(dim=[1, 2]) / num_pairs).mean()
-        
-        return loss
-        
-    def forward(self, y_pred, y_true):
-        """
-        y_pred: [batch, num_items]
-        y_true: [batch, num_items] (真实涨跌幅)
-        """
-        batch_size, num_items = y_true.size()
-        k = min(self.k, num_items)
+    date_list = sorted(data['日期'].unique())
+    valid_dates = date_list[sequence_length - 1:]
+    date2qid = {d: i for i, d in enumerate(valid_dates)}
 
-        # 1. 识别 top-k 的样本
-        _, top_indices = torch.topk(y_true, k, dim=1)
-        
-        # 2. 创建权重向量
-        weights = torch.full_like(y_true, fill_value=self.base_weight)
-        for i in range(batch_size):
-            weights[i, top_indices[i]] = self.weight_factor
-            
-        # 3. 计算加权损失
-        listwise = self.listwise_loss(y_pred, y_true, weights)
-        pairwise = self.pairwise_loss(y_pred, y_true, weights)
-        
-        # 组合两种损失
-        total_loss = listwise + self.pairwise_weight * pairwise
-        
-        return total_loss
+    n_feat = len(features)
+    feat_dim = flatten_days * n_feat + 3  # +3 市场状态特征
 
-def calculate_ranking_metrics(y_pred, y_true, masks, k=5, min_gap=None):
-    """计算新的评估指标：Top 5 收益之和，以及与理论最高值和随机值的比值"""
-    if min_gap is None:
-        min_gap = config_extended.get('min_gap', 0.005)
+    # ── 预计算市场状态特征 ──
+    print("正在计算市场状态特征...")
+    market_daily = data.groupby('日期')['label'].mean().sort_index()
+    market_returns = market_daily.values
+    # 20日波动率 + 60日累计趋势
+    market_vol = pd.Series(market_returns, index=market_daily.index).rolling(20, min_periods=5).std().values
+    market_trend = pd.Series(market_returns, index=market_daily.index).rolling(60, min_periods=10).sum().values
+    date2market = {}
+    for i, d in enumerate(market_daily.index):
+        date2market[d] = (
+            float(market_returns[i]),
+            float(market_vol[i]) if not np.isnan(market_vol[i]) else 0.0,
+            float(market_trend[i]) if not np.isnan(market_trend[i]) else 0.0,
+        )
 
-    batch_size = y_pred.size(0)
-    
-    # Metrics accumulators
-    pred_return_sum_list = []
-    max_return_sum_list = []
-    random_return_sum_list = []
-    ratio_pred_list = []
-    ratio_random_list = []
-    final_score_list = []
-    num_total_days = 0
-    
-    for i in range(batch_size):
-        mask = masks[i]
-        valid_indices = mask.nonzero().squeeze()
-        
-        if valid_indices.numel() < k:
-            continue
-        
-        num_total_days += 1
-            
-        valid_pred = y_pred[i][valid_indices]
-        valid_true = y_true[i][valid_indices] # This is the 5-day return
-        
-        # 1. Predicted Top 5
-        _, pred_indices = torch.topk(valid_pred, k)
-        pred_top_returns = valid_true[pred_indices]
-        pred_return_sum = pred_top_returns.sum().item()
-        
-        # 2. True Top 5 (Theoretical Max)
-        _, true_indices = torch.topk(valid_true, k)
-        true_top_returns = valid_true[true_indices]
-        max_return_sum = true_top_returns.sum().item()
-        
-        # 3. Random 5 (Expected Value)
-        # Expected sum = 5 * mean(all valid returns)
-        random_return_sum = k * valid_true.mean().item()
-        
-        # ---- 新增：跳过低信息量交易日 ----
-        gap = max_return_sum - random_return_sum
-        if abs(gap) < min_gap:
-            continue
-        # ---- 新增结束 ----
-        
-        # 计算每个样本的比例与稳定化 final_score
-        ratio_pred = pred_return_sum / (max_return_sum + 1e-12) if abs(max_return_sum) > 1e-9 else 0.0
-        ratio_random = random_return_sum / (max_return_sum + 1e-12) if abs(max_return_sum) > 1e-9 else 0.0
-        denominator = max_return_sum - random_return_sum
-        final_score = (pred_return_sum - random_return_sum) / (denominator + 1e-12) if abs(denominator) > 1e-6 else 0.0
-        
-        pred_return_sum_list.append(pred_return_sum)
-        max_return_sum_list.append(max_return_sum)
-        random_return_sum_list.append(random_return_sum)
-        ratio_pred_list.append(ratio_pred)
-        ratio_random_list.append(ratio_random)
-        final_score_list.append(final_score)
-        
-    metrics = {
-        'pred_return_sum': np.mean(pred_return_sum_list) if pred_return_sum_list else 0.0,
-        'max_return_sum': np.mean(max_return_sum_list) if max_return_sum_list else 0.0,
-        'random_return_sum': np.mean(random_return_sum_list) if random_return_sum_list else 0.0,
-    }
-    
-    # 比值用逐样本均值，降低极端日影响
-    metrics['ratio_pred'] = np.mean(ratio_pred_list) if ratio_pred_list else 0.0
-    metrics['ratio_random'] = np.mean(ratio_random_list) if ratio_random_list else 0.0
-    metrics['final_score'] = np.mean(final_score_list) if final_score_list else 0.0
-    # 新增：有效交易日比例
-    metrics['valid_days_ratio'] = len(final_score_list) / max(num_total_days, 1)
-    
-    return metrics
+    # ── 第一遍：统计总样本数 ──
+    print("正在统计样本数...")
+    total_samples = 0
+    for _, group in data.groupby('instrument', sort=False):
+        n = len(group)
+        group_dates = group['日期'].values
+        for i in range(sequence_length - 1, n):
+            if group_dates[i] in date2qid:
+                total_samples += 1
+    print(f"总样本数: {total_samples:,}")
 
-class RankingDataset(torch.utils.data.Dataset):
-    """排序数据集类"""
-    def __init__(self, sequences, targets, relevance_scores, stock_indices):
-        self.sequences = sequences
-        self.targets = targets
-        self.relevance_scores = relevance_scores
-        self.stock_indices = stock_indices
-    
-    def __len__(self):
-        return len(self.sequences)
-    
-    def __getitem__(self, idx):
-        return {
-            'sequences': torch.FloatTensor(self.sequences[idx]),  # [num_stocks, seq_len, features]
-            'targets': torch.FloatTensor(self.targets[idx]),      # [num_stocks] 真实涨跌幅
-            'relevance': torch.LongTensor(self.relevance_scores[idx]),  # [num_stocks] 排序标签
-            'stock_indices': torch.LongTensor(self.stock_indices[idx])  # [num_stocks] 股票索引
+    # ── 预分配 memmap（写到项目 output 目录而非系统临时目录） ──
+    mmap_dir = config.get('output_dir', './model')
+    os.makedirs(mmap_dir, exist_ok=True)
+    tmpfile = tempfile.NamedTemporaryFile(suffix='.dat', delete=False, dir=mmap_dir)
+    X = np.memmap(tmpfile.name, dtype=np.float32, mode='w+', shape=(total_samples, feat_dim))
+    y = np.empty(total_samples, dtype=np.float32)
+    qid = np.empty(total_samples, dtype=np.int32)
+
+    # ── 预建每只股票的索引（日期 → 行号），用于快速查找 ──
+    print("正在构建索引...")
+    stock_groups = {}
+    for stock, group in data.groupby('instrument', sort=False):
+        group = group.set_index('日期').sort_index()
+        stock_groups[stock] = {
+            'feat': group[features].values.astype(np.float32),
+            'label': group['label'].values.astype(np.float32),
+            'dates': group.index.values,
         }
 
-def collate_fn(batch):
-    """自定义collate函数处理变长序列"""
-    sequences = [item['sequences'] for item in batch]
-    targets = [item['targets'] for item in batch]
-    relevance = [item['relevance'] for item in batch]
-    stock_indices = [item['stock_indices'] for item in batch]
-    
-    # 找到最大股票数量
-    max_stocks = max(seq.size(0) for seq in sequences)
-    
-    # Padding到相同长度
-    padded_sequences = []
-    padded_targets = []
-    padded_relevance = []
-    padded_stock_indices = []
-    masks = []
-    
-    for seq, tgt, rel, stock_idx in zip(sequences, targets, relevance, stock_indices):
-        num_stocks = seq.size(0)
-        seq_len = seq.size(1)
-        feature_dim = seq.size(2)
-        
-        # 创建padding
-        if num_stocks < max_stocks:
-            pad_size = max_stocks - num_stocks
-            seq_pad = torch.zeros(pad_size, seq_len, feature_dim)
-            tgt_pad = torch.zeros(pad_size)
-            rel_pad = torch.zeros(pad_size, dtype=torch.long)
-            stock_pad = torch.zeros(pad_size, dtype=torch.long)
-            
-            seq = torch.cat([seq, seq_pad], dim=0)
-            tgt = torch.cat([tgt, tgt_pad], dim=0)
-            rel = torch.cat([rel, rel_pad], dim=0)
-            stock_idx = torch.cat([stock_idx, stock_pad], dim=0)
-        
-        # 创建mask标记有效位置
-        mask = torch.ones(max_stocks)
-        mask[num_stocks:] = 0
-        
-        padded_sequences.append(seq)
-        padded_targets.append(tgt)
-        padded_relevance.append(rel)
-        padded_stock_indices.append(stock_idx)
-        masks.append(mask)
-    
-    return {
-        'sequences': torch.stack(padded_sequences),      # [batch, max_stocks, seq_len, features]
-        'targets': torch.stack(padded_targets),          # [batch, max_stocks]
-        'relevance': torch.stack(padded_relevance),      # [batch, max_stocks]
-        'stock_indices': torch.stack(padded_stock_indices),  # [batch, max_stocks]
-        'masks': torch.stack(masks)                      # [batch, max_stocks]
-    }
-
-# 排序训练函数
-def train_ranking_model(model, dataloader, criterion, optimizer, device, epoch, writer):
-    model.train()
-    total_loss = 0
-    total_metrics = {}
-    local_step = 0
-    
-    for batch in tqdm(dataloader, desc=f"Training Epoch {epoch+1}"):
-        sequences = batch['sequences'].to(device)    # [batch, max_stocks, seq_len, features]
-        targets = batch['targets'].to(device)        # [batch, max_stocks] 真实涨跌幅
-        relevance = batch['relevance'].to(device)    # [batch, max_stocks] 预处理的相关性得分
-        masks = batch['masks'].to(device)            # [batch, max_stocks] 有效位置mask
-        
-        optimizer.zero_grad()
-        
-        # 模型预测
-        outputs = model(sequences)  # [batch, max_stocks] 预测分数
-        
-        # 应用mask，只考虑有效股票
-        masked_outputs = outputs * masks + (1 - masks) * (-1e9)  # 无效位置设为很小的值
-        masked_targets = targets * masks
-        masked_relevance = relevance.float() * masks  # 使用预处理好的相关性得分
-        
-        # 计算损失（只对有效股票计算）
-        batch_loss = None
-        batch_size = sequences.size(0)
-        
-        for i in range(batch_size):
-            mask = masks[i]
-            valid_indices = mask.nonzero().squeeze()
-            
-            if valid_indices.numel() == 0:
+    # ── 第二遍：按日期顺序遍历，天然保证 qid 有序 ──
+    print(f"正在展平时序特征（最后{flatten_days}天 × {n_feat}维 + 3市场 = {feat_dim:,}维，memmap 模式）...")
+    write_pos = 0
+    for q, d in enumerate(tqdm(valid_dates, desc="展平特征")):
+        mkt_feat = date2market.get(d, (0.0, 0.0, 0.0))
+        for stock, grp in stock_groups.items():
+            idx = np.where(grp['dates'] == d)[0]
+            if len(idx) == 0:
                 continue
-                
-            if valid_indices.dim() == 0:
-                valid_indices = valid_indices.unsqueeze(0)
-            
-            # 获取有效股票的预测值和预处理好的相关性得分
-            valid_pred = masked_outputs[i][valid_indices]
-            valid_relevance = masked_relevance[i][valid_indices]
-            
-            if len(valid_pred) > 1:
-                # 直接使用预处理好的相关性得分，无需重新计算
-                loss = criterion(valid_pred.unsqueeze(0), valid_relevance.unsqueeze(0))
-                batch_loss = batch_loss + loss if isinstance(batch_loss, torch.Tensor) else loss
-        
-        if batch_loss is not None:
-            batch_loss = batch_loss / batch_size
-            batch_loss.backward()
-            if not config.get('drop_clip', True):
-                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), config['max_grad_norm'])
-                if writer:
-                    writer.add_scalar('train/grad_norm', grad_norm, global_step=epoch*len(dataloader)+local_step)
-            optimizer.step()
-            
-            total_loss += batch_loss.item()
-            
-            # 计算评估指标
-            with torch.no_grad():
-                metrics = calculate_ranking_metrics(masked_outputs, masked_targets, masks, k=5)
-                for k, v in metrics.items():
-                    if k not in total_metrics:
-                        total_metrics[k] = 0
-                    total_metrics[k] += v
-            
-            local_step += 1
-            if writer:
-                writer.add_scalar('train/loss', batch_loss.item(), global_step=epoch*len(dataloader)+local_step)
-                for k, v in metrics.items():
-                    writer.add_scalar(f'train/{k}', v, global_step=epoch*len(dataloader)+local_step)
-    
-    # 计算平均指标
-    if local_step > 0:
-        for k in total_metrics:
-            total_metrics[k] /= local_step
-    
-    return total_loss / len(dataloader) if len(dataloader) > 0 else 0, total_metrics
+            i = idx[0]
+            if i < sequence_length - 1:
+                continue
+            # 只取最后 flatten_days 天展平
+            seq = grp['feat'][max(0, i - flatten_days + 1): i + 1]
+            # 补齐：若不足 flatten_days 天，前面补零
+            if len(seq) < flatten_days:
+                pad = np.zeros((flatten_days - len(seq), n_feat), dtype=np.float32)
+                seq = np.vstack([pad, seq])
+            flat = seq.flatten()
+            # 追加市场状态特征
+            row = np.concatenate([flat, np.array(mkt_feat, dtype=np.float32)])
+            X[write_pos] = row
+            y[write_pos] = grp['label'][i]
+            qid[write_pos] = q
+            write_pos += 1
 
-def evaluate_ranking_model(model, dataloader, criterion, device, writer, epoch):
-    model.eval()
-    total_loss = 0
-    total_metrics = {}
-    num_batches = 0
+    X_final = X[:write_pos]        # memmap 切片，不占额外 RAM
+    y = y[:write_pos]
+    qid = qid[:write_pos]
 
-    # 收集所有 batch 的预测和真实值，用于最终的扩展评估
-    all_masked_outputs = []
-    all_masked_targets = []
-    all_masks = []
-    
-    with torch.no_grad():
-        for batch in tqdm(dataloader, desc=f"Evaluating Epoch {epoch+1}"):
-            sequences = batch['sequences'].to(device)
-            targets = batch['targets'].to(device)
-            masks = batch['masks'].to(device)
-            
-            # 模型预测
-            outputs = model(sequences)
-            
-            # 应用mask
-            masked_outputs = outputs * masks + (1 - masks) * (-1e9)
-            masked_targets = targets * masks
-            
-            # 保存用于扩展评估
-            all_masked_outputs.append(masked_outputs.cpu())
-            all_masked_targets.append(masked_targets.cpu())
-            all_masks.append(masks.cpu())
-            
-            # 计算损失
-            batch_loss = None
-            batch_size = sequences.size(0)
-            
-            for i in range(batch_size):
-                mask = masks[i]
-                valid_indices = mask.nonzero().squeeze()
-                
-                if valid_indices.numel() == 0:
-                    continue
-                    
-                if valid_indices.dim() == 0:
-                    valid_indices = valid_indices.unsqueeze(0)
-                
-                valid_pred = masked_outputs[i][valid_indices]
-                valid_true = masked_targets[i][valid_indices]
-                
-                if len(valid_pred) > 1:
-                    _, sorted_indices = torch.sort(valid_true, descending=True)
-                    relevance_scores = torch.zeros_like(valid_true, requires_grad=False)
-                    relevance_scores[sorted_indices] = torch.arange(len(valid_true), 0, -1, device=device, dtype=torch.float32)
-                    relevance_scores = relevance_scores.detach()
-                    
-                    loss = criterion(valid_pred.unsqueeze(0), relevance_scores.unsqueeze(0))
-                    batch_loss = batch_loss + loss if batch_loss is not None else loss
-            
-            if batch_loss is not None:
-                batch_loss = batch_loss / batch_size
-                total_loss += batch_loss.item()
-            
-            # 计算评估指标（原有逻辑，含 min_gap 过滤）
-            metrics = calculate_ranking_metrics(masked_outputs, masked_targets, masks, k=5)
-            for k, v in metrics.items():
-                if k not in total_metrics:
-                    total_metrics[k] = 0
-                total_metrics[k] += v
-            
-            num_batches += 1
-    
-    # 计算平均指标
-    avg_loss = total_loss / num_batches if num_batches > 0 else 0
-    for k in total_metrics:
-        total_metrics[k] /= num_batches
-    
-    # ---- 新增：全局扩展评估 ----
-    if len(all_masked_outputs) > 0:
-        # 不同 batch 的 max_stocks 可能不同（collate_fn 按 batch 内最大股票数 padding），
-        # 需要统一到全局最大股票数再拼接
-        max_stocks_global = max(t.size(1) for t in all_masked_outputs)
-        padded_outputs, padded_targets, padded_masks = [], [], []
-        for out, tgt, msk in zip(all_masked_outputs, all_masked_targets, all_masks):
-            curr = out.size(1)
-            if curr < max_stocks_global:
-                pad = max_stocks_global - curr
-                out = F.pad(out, (0, pad), value=-1e9)
-                tgt = F.pad(tgt, (0, pad), value=0)
-                msk = F.pad(msk, (0, pad), value=0)
-            padded_outputs.append(out)
-            padded_targets.append(tgt)
-            padded_masks.append(msk)
-
-        global_pred = torch.cat(padded_outputs, dim=0)
-        global_true = torch.cat(padded_targets, dim=0)
-        global_mask = torch.cat(padded_masks, dim=0)
-        k_val = config_extended.get('eval_top_k', 5)
-        min_gap_val = config_extended.get('min_gap', 0.005)
-        extended = calculate_extended_metrics(global_pred, global_true, global_mask, k=k_val, min_gap=min_gap_val)
-        # 合并到 total_metrics
-        for k, v in extended.items():
-            total_metrics[k] = v
-    # ---- 新增结束 ----
-    
-    if writer:
-        writer.add_scalar('eval/loss', avg_loss, global_step=epoch)
-        for k, v in total_metrics.items():
-            writer.add_scalar(f'eval/{k}', v, global_step=epoch)
-    
-    return avg_loss, total_metrics
+    print(f"展平完成：{write_pos:,} 个样本，{feat_dim:,} 维特征，{len(valid_dates)} 个交易组")
+    return X_final, y, qid, None, None, valid_dates
 
 
-def predict_top_stocks(model, data, features, sequence_length, scaler, stockid2idx, device, top_k=5):
-    """
-    预测某一天涨幅前top_k的股票
-    """
-    model.eval()
-    
-    # 获取最后一天的数据作为预测基础
-    latest_date = data['日期'].max()
-    
-    # 准备预测数据
-    day_sequences = []
-    day_stock_codes = []
-    day_stock_indices = []
-    
-    for stock_code in data['股票代码'].unique():
-        # 获取该股票历史sequence_length天的数据
-        stock_history = data[
-            (data['股票代码'] == stock_code) & 
-            (data['日期'] <= latest_date)
-        ].sort_values('日期').tail(sequence_length)
-        
-        if len(stock_history) == sequence_length:
-            seq = stock_history[features].values
-            day_sequences.append(seq)
-            day_stock_codes.append(stock_code)
-            day_stock_indices.append(stockid2idx[stock_code])
-    
-    if len(day_sequences) == 0:
-        return []
-    
-    # 转换为tensor
-    sequences = torch.FloatTensor(np.array(day_sequences)).unsqueeze(0).to(device)  # [1, num_stocks, seq_len, features]
-    
-    with torch.no_grad():
-        # 模型预测
-        outputs = model(sequences)  # [1, num_stocks]
-        scores = outputs.squeeze().cpu().numpy()  # [num_stocks]
-        
-        # 获取排名前top_k的股票
-        top_indices = np.argsort(scores)[::-1][:top_k]
-        
-        top_stocks = []
-        for idx in top_indices:
-            top_stocks.append({
-                'stock_code': day_stock_codes[idx],
-                'predicted_score': scores[idx],
-                'rank': len(top_stocks) + 1
-            })
-    
-    return top_stocks
+# ============================================================
+#  验证集划分
+# ============================================================
 
-def save_predictions(top_stocks, output_path):
-    """保存预测结果"""
-    results = []
-    for stock in top_stocks:
-        results.append({
-            '排名': stock['rank'],
-            '股票代码': stock['stock_code'],
-            '预测分数': stock['predicted_score']
-        })
-    
-    df = pd.DataFrame(results)
-    df.to_csv(output_path, index=False, encoding='utf-8')
-    print(f"预测结果已保存到: {output_path}")
-
-
-def split_train_val_by_last_month(df, sequence_length, val_months=6):
-    """按末尾 N 个月做验证集划分，并为验证集补充序列上下文。"""
+def split_train_val_by_last_month(df, sequence_length, val_months=12):
+    """按末尾 N 个月做验证集划分。"""
     df = df.copy()
     df['日期'] = pd.to_datetime(df['日期'])
     df = df.sort_values(['日期', '股票代码']).reset_index(drop=True)
@@ -582,222 +255,295 @@ def split_train_val_by_last_month(df, sequence_length, val_months=6):
     last_date = df['日期'].max()
     val_start = (last_date - pd.DateOffset(months=val_months)).normalize()
 
-    # 验证集需要保留前 sequence_length-1 个交易日作为序列上下文，
-    # 这样第一个验证样本的窗口结束日就可以落在 val_start。
-    val_context_start = val_start - pd.tseries.offsets.BDay(sequence_length - 1)
-
     train_df = df[df['日期'] < val_start].copy()
-    val_df = df[df['日期'] >= val_context_start].copy()
+    val_df = df[df['日期'] >= val_start].copy()
 
-    print(f"全量数据范围: {df['日期'].min().date()} 到 {last_date.date()}")
-    print(f"训练集范围: {train_df['日期'].min().date()} 到 {train_df['日期'].max().date()}")
-    print(f"验证集目标范围(最后一个月): {val_start.date()} 到 {last_date.date()}")
-    print(f"验证集实际取数范围(含序列上下文): {val_df['日期'].min().date()} 到 {val_df['日期'].max().date()}")
-
-    # 恢复为字符串，保持与原流程一致
     train_df['日期'] = train_df['日期'].dt.strftime('%Y-%m-%d')
     val_df['日期'] = val_df['日期'].dt.strftime('%Y-%m-%d')
 
     return train_df, val_df, val_start
 
-# 参数化的单窗口训练函数（供 cross_val.py 复用）
-def train_one_window(train_df, val_df, val_start, stockid2idx, num_stocks, config, device, writer, output_dir):
+
+# ============================================================
+#  标签转换：连续超额收益 → 整数排名（XGBRanker 要求）
+# ============================================================
+
+def _continuous_labels_to_ranks(y, qid):
     """
-    参数化的单窗口训练函数。
-    接收已划分好的训练集和验证集 DataFrame，执行特征工程→标准化→
-    数据集构建→模型训练→保存最佳模型的完整流程。
+    XGBRanker rank:pairwise 要求标签为整数。
+    将每组 (qid) 内的连续标签按降序排名，最高收益→最高整数排名。
+
+    例：y=[0.05, -0.02, 0.03], qid=[0,0,0] → rank=[2, 0, 1]
+    同时返回原始连续标签，供后续 evaluate_xgb_model 计算实际收益指标。
+    """
+    y_rank = np.zeros_like(y, dtype=np.int32)
+    for q in np.unique(qid):
+        mask = qid == q
+        group_y = y[mask]
+        # argsort 两次得到 dense rank（0-based）
+        order = np.argsort(group_y)                     # 升序：最低收益排最前
+        rank = np.empty_like(order)
+        rank[order] = np.arange(len(group_y))           # 0 = 最低，n-1 = 最高
+        y_rank[mask] = rank
+    return y_rank
+
+
+# ============================================================
+#  评估：复用 evaluation.py（不修改指标计算）
+# ============================================================
+
+def evaluate_xgb_model(model, X_val, y_val, qid_val, valid_dates, val_df, features,
+                       scaler, sequence_length, k=5, min_gap=0.005):
+    """
+    在验证集上使用自定义指标评估 XGBRanker。
+    步骤：按日期分组 → 对每组内的股票打分 → 计算 extended_metrics
+    """
+    import torch
+    preds = model.predict(X_val)
+
+    # 按 qid 分组，构建每日的 pred/true/mask
+    daily_metrics = {
+        'pred_return_sum': [], 'max_return_sum': [], 'random_return_sum': [],
+        'ratio_pred': [], 'ratio_random': [], 'final_score': [],
+        'topk_hit': [], 'spearman': [], 'win': [],
+    }
+
+    unique_qids = sorted(set(qid_val))
+    num_total = 0
+    num_valid = 0
+
+    for q in unique_qids:
+        mask = qid_val == q
+        day_preds = torch.tensor(preds[mask], dtype=torch.float32)
+        day_labels = torch.tensor(y_val[mask], dtype=torch.float32)
+        n = len(day_preds)
+        if n < k:
+            continue
+        num_total += 1
+
+        # 按预测排序取 top k
+        _, topk_idx = torch.topk(day_preds, k)
+        topk_returns = day_labels[topk_idx]
+        pred_sum = topk_returns.sum().item()
+
+        _, true_topk_idx = torch.topk(day_labels, k)
+        max_sum = day_labels[true_topk_idx].sum().item()
+        random_sum = k * day_labels.mean().item()
+
+        gap = max_sum - random_sum
+        if abs(gap) < min_gap:
+            continue
+
+        num_valid += 1
+        daily_metrics['pred_return_sum'].append(pred_sum)
+        daily_metrics['max_return_sum'].append(max_sum)
+        daily_metrics['random_return_sum'].append(random_sum)
+
+        fs = (pred_sum - random_sum) / (gap + 1e-12) if abs(gap) > 1e-6 else 0.0
+        daily_metrics['final_score'].append(fs)
+
+        # TopK 命中
+        true_set = set(true_topk_idx.numpy())
+        pred_set = set(topk_idx.numpy())
+        daily_metrics['topk_hit'].append(len(true_set & pred_set))
+
+        # Spearman
+        from evaluation import _spearman_rho_pytorch
+        daily_metrics['spearman'].append(_spearman_rho_pytorch(day_preds, day_labels))
+
+        # Win rate
+        daily_metrics['win'].append(1.0 if topk_returns.mean().item() > day_labels.mean().item() else 0.0)
+
+    n = num_valid
+    metrics = {
+        'final_score': np.mean(daily_metrics['final_score']) if n > 0 else 0.0,
+        'topk_hit_rate': (np.mean(daily_metrics['topk_hit']) / k) if n > 0 else 0.0,
+        'topk_hit_count': np.mean(daily_metrics['topk_hit']) if n > 0 else 0.0,
+        'spearman_rho': np.mean(daily_metrics['spearman']) if n > 0 else 0.0,
+        'win_rate': np.mean(daily_metrics['win']) if n > 0 else 0.0,
+        'final_score_std': np.std(daily_metrics['final_score'], ddof=1) if n > 1 else 0.0,
+        'pred_return_sum': np.mean(daily_metrics['pred_return_sum']) if n > 0 else 0.0,
+        'valid_days_ratio': n / max(num_total, 1),
+        'valid_days': n,
+        'total_days': num_total,
+    }
+    return metrics
+
+
+# ============================================================
+#  单窗口训练函数（XGBRanker）
+# ============================================================
+
+def train_one_window(train_df, val_df, val_start, stockid2idx, num_stocks, config, output_dir):
+    """
+    XGBRanker 单窗口训练 + 评估。
 
     Args:
-        train_df: 训练集 DataFrame（含原始OHLCV列）
-        val_df:   验证集 DataFrame（含序列上下文）
-        val_start: 验证集目标起始日期 (pd.Timestamp)
-        stockid2idx: 股票代码到索引的映射
+        train_df: 训练集 DataFrame
+        val_df:   验证集 DataFrame
+        val_start: 验证集起始日期
+        stockid2idx: 股票代码映射
         num_stocks: 总股票数
         config: 配置字典
-        device: torch 设备
-        writer: TensorBoard writer（可为 None）
-        output_dir: 模型和 scaler 的输出目录
+        output_dir: 输出目录
 
     Returns:
-        best_score: 最佳 final_score
-        extended_metrics: 最佳 epoch 的扩展评估指标字典
+        best_score, extended_metrics
     """
-    # 2. 特征工程与预处理
-    train_data, features = preprocess_data(train_df, is_train=True, stockid2idx=stockid2idx)
+    sequence_length = config['sequence_length']
+    features_list = feature_columns_map[config['feature_num']]
+    flatten_days = config.get('xgb_flatten_days', 10)
+
+    # ── 特征工程 ──
+    train_data, _ = preprocess_data(train_df, is_train=True, stockid2idx=stockid2idx)
     val_data, _ = preprocess_val_data(val_df, stockid2idx=stockid2idx)
 
-    # 3. 标准化
+    # ── 标准化 ──
     scaler = StandardScaler()
-    train_data[features] = train_data[features].replace([np.inf, -np.inf], np.nan)
-    val_data[features] = val_data[features].replace([np.inf, -np.inf], np.nan)
-    train_data = train_data.dropna(subset=features)
-    val_data = val_data.dropna(subset=features)
-    train_data[features] = scaler.fit_transform(train_data[features])
-    val_data[features] = scaler.transform(val_data[features])
+    for col_set in [train_data, val_data]:
+        col_set[features_list] = col_set[features_list].replace([np.inf, -np.inf], np.nan)
+    train_data = train_data.dropna(subset=features_list)
+    val_data = val_data.dropna(subset=features_list)
+    train_data[features_list] = scaler.fit_transform(train_data[features_list])
+    val_data[features_list] = scaler.transform(val_data[features_list])
     joblib.dump(scaler, os.path.join(output_dir, 'scaler.pkl'))
 
-    # 4. 创建排序数据集
-    train_sequences, train_targets, train_relevance, train_stock_indices = create_ranking_dataset_vectorized(
-        train_data, features, config['sequence_length'],
-        ranking_data_path=config.get('train_ranking_data_path')
+    # ── 展平特征 ──
+    X_train, y_train_cont, qid_train, _, _, valid_train_dates = flatten_sequences_to_xgb(
+        train_data, features_list, sequence_length
     )
-    val_sequences, val_targets, val_relevance, val_stock_indices = create_ranking_dataset_vectorized(
-        val_data, features, config['sequence_length'],
-        ranking_data_path=config.get('val_ranking_data_path'),
-        min_window_end_date=val_start.strftime('%Y-%m-%d')
+    X_val, y_val_cont, qid_val, val_sample_dates, val_sample_stocks, valid_val_dates = flatten_sequences_to_xgb(
+        val_data, features_list, sequence_length
     )
-    print(f"训练集样本数: {len(train_sequences)}")
-    print(f"验证集样本数: {len(val_sequences)}")
 
-    # 5. 创建数据加载器
-    train_dataset = RankingDataset(train_sequences, train_targets, train_relevance, train_stock_indices)
-    val_dataset = RankingDataset(val_sequences, val_targets, val_relevance, val_stock_indices)
-    train_loader = DataLoader(train_dataset, batch_size=config['batch_size'], shuffle=True,
-                              collate_fn=collate_fn, num_workers=0, pin_memory=False)
-    val_loader = DataLoader(val_dataset, batch_size=config['batch_size'], shuffle=False,
-                            collate_fn=collate_fn, num_workers=0, pin_memory=False)
+    # ── 标签转换：连续超额收益 → 整数排名（XGBRanker rank:pairwise 要求） ──
+    y_train = _continuous_labels_to_ranks(y_train_cont, qid_train)
+    y_val = _continuous_labels_to_ranks(y_val_cont, qid_val)
 
-    # 6. 模型初始化
-    model = StockTransformer(input_dim=len(features), config=config, num_stocks=num_stocks)
-    model.to(device)
-    print(f"模型参数量: {sum(p.numel() for p in model.parameters() if p.requires_grad)}")
+    # ── XGBRanker 按组的样本数 ──
+    train_groups = [np.sum(qid_train == q) for q in sorted(set(qid_train))]
+    val_groups = [np.sum(qid_val == q) for q in sorted(set(qid_val))]
 
-    # 7. 损失函数和优化器
-    criterion = WeightedRankingLoss(
-        k=5, temperature=1.0,
-        weight_factor=config['top5_weight'],
-        pairwise_weight=config['pairwise_weight'],
-        base_weight=config.get('base_weight', 1.0)
+    print(f"\nXGBRanker 训练配置:")
+    print(f"  训练样本: {len(X_train):,} 行，{X_train.shape[1]} 维特征")
+    print(f"  训练组数: {len(train_groups)} 天")
+    print(f"  验证样本: {len(X_val):,} 行")
+    print(f"  验证组数: {len(val_groups)} 天")
+
+    # ── 构建 XGBRanker ──
+    xgb_params = {
+        'max_depth': xgb_config['max_depth'],
+        'learning_rate': xgb_config['learning_rate'],
+        'n_estimators': xgb_config['n_estimators'],
+        'subsample': xgb_config['subsample'],
+        'colsample_bytree': xgb_config['colsample_bytree'],
+        'reg_alpha': xgb_config['reg_alpha'],
+        'reg_lambda': xgb_config['reg_lambda'],
+        'min_child_weight': xgb_config['min_child_weight'],
+        'objective': xgb_config['objective'],
+        'eval_metric': xgb_config['eval_metric'],
+        'ndcg_exp_gain': False,                         # 禁用指数增益（标签>31时必需）
+        'verbosity': xgb_config['verbosity'],
+        'n_jobs': xgb_config['n_jobs'],
+        'tree_method': 'hist',
+        'random_state': 42,
+    }
+
+    model = xgb.XGBRanker(**xgb_params)
+
+    print("\n开始训练 XGBRanker ...")
+    model.fit(
+        X_train, y_train,
+        qid=qid_train,
+        eval_set=[(X_val, y_val)],
+        eval_qid=[qid_val],
+        verbose=20,
     )
-    optimizer = torch.optim.AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=1e-5)
-    scheduler = torch.optim.lr_scheduler.LinearLR(optimizer, start_factor=1.0, end_factor=0.2,
-                                                   total_iters=config['num_epochs'])
 
-    # 8. 排序模型训练
-    best_score = -float('inf')
-    best_epoch = -1
-    best_extended_metrics = {}
+    # ── 输出特征重要性 ──
+    importance = model.feature_importances_
+    top_idx = np.argsort(importance)[-20:][::-1]
+    n_feat_per_day = len(features_list)
+    print(f"\n特征重要性 Top20 (共{len(importance)}维, 每{n_feat_per_day}维=1天特征, 最后3维=市场状态):")
+    for rank, idx in enumerate(top_idx):
+        if idx >= len(importance) - 3:
+            label = ["市场均值", "市场波动率", "市场趋势"][idx - (len(importance) - 3)]
+        else:
+            day = idx // n_feat_per_day + 1
+            f_idx = idx % n_feat_per_day
+            label = f"T-{flatten_days - day + 1}天_{features_list[f_idx][:8]}"
+        print(f"  {rank+1:2d}. {label}: {importance[idx]:.6f}")
 
-    # ---- 新增：初始化早停器 ----
-    esc = config.get('early_stop_config', {})
-    early_stopper = None
-    if esc.get('enabled', True):
-        early_stopper = NoiseAwareEarlyStopping(
-            base_patience=esc.get('base_patience', 15),
-            min_delta=esc.get('min_delta', 1e-4),
-            warmup_epochs=esc.get('warmup_epochs', 15),
-            smoothing_alpha=esc.get('smoothing_alpha', 0.3),
-            min_acceptable_score=esc.get('min_acceptable_score', 0.0),
-            verbose=True,
-        )
-    # ---- 新增结束 ----
+    # ── 评估（使用原始连续收益标签，非整数排位） ──
+    min_gap_val = config_extended.get('min_gap', 0.005)
+    k_val = config_extended.get('eval_top_k', 5)
+    extended_metrics = evaluate_xgb_model(
+        model, X_val, y_val_cont, qid_val, valid_val_dates,
+        val_data, features_list, scaler, sequence_length,
+        k=k_val, min_gap=min_gap_val
+    )
 
-    for epoch in range(config['num_epochs']):
-        print(f"\n=== Epoch {epoch+1}/{config['num_epochs']} ===")
+    best_score = extended_metrics.get('final_score', 0.0)
 
-        train_loss, train_metrics = train_ranking_model(
-            model, train_loader, criterion, optimizer, device, epoch, writer
-        )
-        print(f"Train Loss: {train_loss:.4f}")
-        for k, v in train_metrics.items():
-            print(f"Train {k}: {v:.4f}")
+    # ── 保存模型 ──
+    model_path = os.path.join(output_dir, 'best_model.json')
+    model.save_model(model_path)
+    # 同时保存 pkl（兼容 cross_val.py）
+    joblib.dump(model, os.path.join(output_dir, 'best_model.pkl'))
 
-        eval_loss, eval_metrics = evaluate_ranking_model(
-            model, val_loader, criterion, device, writer, epoch
-        )
-        print(f"Eval Loss: {eval_loss:.4f}")
-        for k, v in eval_metrics.items():
-            print(f"Eval {k}: {v:.4f}")
-
-        scheduler.step()
-        if writer:
-            writer.add_scalar('train/learning_rate', scheduler.get_last_lr()[0], global_step=epoch)
-
-        # ---- 新增：早停判断 ----
-        current_final_score = eval_metrics.get('final_score', 0.0)
-        if early_stopper is not None:
-            current_lr = scheduler.get_last_lr()[0]
-            should_stop = early_stopper.step(
-                score=current_final_score,
-                epoch=epoch,
-                current_lr=current_lr,
-            )
-            if should_stop:
-                print(f"\n[早停] 在第 {epoch+1} 个 epoch 触发早停，停止训练。")
-                break
-        # ---- 新增结束 ----
-
-        if current_final_score > best_score:
-            best_score = current_final_score
-            best_epoch = epoch + 1
-            best_extended_metrics = {k: v for k, v in eval_metrics.items()}
-            torch.save(model.state_dict(), os.path.join(output_dir, 'best_model.pth'))
-            print(f"保存最佳模型 - final score: {best_score:.4f}")
-
-    # ---- 新增：打印早停摘要 ----
-    if early_stopper is not None:
-        print(f"\n{early_stopper.summary()}")
-    # ---- 新增结束 ----
-
-    print(f"\n训练完成！最佳 epoch: {best_epoch}, 最佳 final score: {best_score:.4f}")
     with open(os.path.join(output_dir, 'final_score.txt'), 'w') as f:
-        f.write(f"Best epoch: {best_epoch}\\nBest final_score: {best_score:.6f}\\n")
+        f.write(f"Best final_score: {best_score:.6f}\n")
 
-    return best_score, best_extended_metrics
-
-
-# 主程序（保持原有行为完全不变）
-def main():
-    set_seed(config.get('seed', 42))
-    output_dir = config['output_dir']
-    os.makedirs(output_dir,exist_ok=True)
-    # 保存在output_dir中保存当前的配置文件，以便复现
-    data_path = config['data_path']
     with open(os.path.join(output_dir, 'config.json'), 'w') as f:
-        json.dump(config, f, indent=4, ensure_ascii=False)
-    is_train = True
-    writer = SummaryWriter(log_dir=os.path.join(output_dir, 'log')) if is_train else None
-    if torch.cuda.is_available():
-        device = torch.device('cuda')
-    elif torch.backends.mps.is_available():
-        device = torch.device('mps')
-    else:
-        device = torch.device('cpu')
-    
-    # 1. 数据加载
+        json.dump({**config, **xgb_config}, f, indent=4, ensure_ascii=False)
+
+    print(f"\n模型已保存到: {model_path}")
+    print(f"验证集最终得分 (final_score): {best_score:.6f}")
+
+    eval_report = format_eval_report(extended_metrics)
+    print(eval_report)
+    with open(os.path.join(output_dir, 'eval_report.txt'), 'w', encoding='utf-8') as f:
+        f.write(eval_report)
+
+    return best_score, extended_metrics
+
+
+# ============================================================
+#  主程序
+# ============================================================
+
+def main():
+    set_seed(42)
+    output_dir = config['output_dir']
+    os.makedirs(output_dir, exist_ok=True)
+
+    data_path = config['data_path']
     data_file = os.path.join(data_path, 'train.csv')
     full_df = pd.read_csv(data_file, dtype={'股票代码': str}, low_memory=False)
+
     train_df, val_df, val_start = split_train_val_by_last_month(
         full_df, config['sequence_length'],
-        val_months=config_extended.get('val_months', 6)
+        val_months=config_extended.get('val_months', 12)
     )
-    
-    # 获取所有股票ID，建立映射
+
     all_stock_ids = full_df['股票代码'].unique()
     stockid2idx = {sid: idx for idx, sid in enumerate(sorted(all_stock_ids))}
     num_stocks = len(stockid2idx)
-    
-    # 调用参数化的单窗口训练函数
+
+    print(f"全量数据范围: {full_df['日期'].min()} 到 {full_df['日期'].max()}")
+    print(f"训练集范围: {train_df['日期'].min()} 到 {train_df['日期'].max()}")
+    print(f"验证集范围: {val_df['日期'].min()} 到 {val_df['日期'].max()}")
+
     best_score, best_extended_metrics = train_one_window(
-        train_df, val_df, val_start, stockid2idx, num_stocks,
-        config, device, writer, output_dir
+        train_df, val_df, val_start, stockid2idx, num_stocks, config, output_dir
     )
 
-    # ---- 新增：训练结束输出扩展评估报告 ----
-    if best_extended_metrics:
-        eval_report = format_eval_report(best_extended_metrics)
-        print(eval_report)
-        with open(os.path.join(output_dir, 'eval_report.txt'), 'w', encoding='utf-8') as f:
-            f.write(eval_report)
-    # ---- 新增结束 ----
-
-    if writer:
-        writer.close()
-
+    print(f"\n{'#'*50}")
+    print(f"  训练完成！最佳 final_score: {best_score:.6f}")
+    print(f"{'#'*50}")
     return best_score
 
+
 if __name__ == "__main__":
-    # 多进程保护
     mp.set_start_method('spawn', force=True)
-    best_score = main()
-    print(f"\n########## 训练完成！最佳 final score: {best_score:.4f} ##########")
+    main()

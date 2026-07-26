@@ -1,0 +1,19 @@
+{
+    "sequence_length": 60,
+    "feature_num": "158+39",
+    "output_dir": "./model/60_158+39",
+    "data_path": "./data",
+    "max_depth": 6,
+    "learning_rate": 0.05,
+    "n_estimators": 500,
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
+    "reg_alpha": 0.1,
+    "reg_lambda": 1.0,
+    "min_child_weight": 5,
+    "objective": "rank:pairwise",
+    "eval_metric": "ndcg@5",
+    "early_stopping_rounds": 30,
+    "verbosity": 1,
+    "n_jobs": -1
+}
