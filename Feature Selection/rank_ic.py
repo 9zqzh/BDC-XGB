@@ -37,6 +37,7 @@ def calculate_rank_ic(data: pd.DataFrame, features: list[str], min_obs: int = 30
 
 
 def run(output_dir: Path, min_ic_mean: float = 0.0, min_icir: float = 0.0, min_days: int = 60) -> pd.DataFrame:
+    output_dir.mkdir(parents=True, exist_ok=True)
     data, features = prepare_data()
     groups = build_feature_groups()
     analysis_features = [f for f in features if f != "instrument" and f in {x for values in groups.values() for x in values}]

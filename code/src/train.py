@@ -79,7 +79,7 @@ def _build_label_and_clean(processed, drop_small_open=True):
     processed['open_t5'] = processed.groupby('股票代码')['开盘'].shift(-5)
 
     if drop_small_open:
-        processed = processed[processed['open_t1'] > 1e-4]
+        processed = processed.loc[processed['open_t1'] > 1e-4].copy()
 
     processed['label'] = (processed['open_t5'] - processed['open_t1']) / (processed['open_t1'] + 1e-12)
 
