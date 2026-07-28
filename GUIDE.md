@@ -49,6 +49,20 @@ end_date = "***"
 
 # 训练与预测
 
+当前项目实际使用 `XGBRanker` 排序模型：
+- 训练入口：`code/src/train.py`
+- 推理入口：`code/src/predict.py`
+- 模型文件：`model/60_158+39/best_model.pkl` 和 `best_model.json`
+- 标准化器：`model/60_158+39/scaler.pkl`
+
+训练方法简述：
+1. 对每只股票做 `158+39` 特征工程；
+2. 构建未来5日超额收益标签；
+3. 按交易日分组，每天作为一个 ranking group；
+4. 取最近 `xgb_flatten_days=10` 天特征展平成 XGBoost 输入；
+5. 使用 `XGBRanker(objective='rank:ndcg', eval_metric='ndcg@5')` 训练；
+6. 用验证集 `final_score`、TopK 命中率、Spearman 等指标评估。
+
 训练：运行根目录下的sh train.sh
 
 windows可以直接运行`python code/src/train.py`
@@ -74,6 +88,30 @@ windows可以直接运行`python code/src/predict.py`
 <img src="./asset/score.png" alt="score" width="50%">
 
 **注意**目前代码中直接选择排序得分最高的五个股票，平均权重。选手可以自行更改代码逻辑，只要满足最多五个股票，权重之和为1即可。
+
+## 超参数调优
+
+可运行：
+
+`uv run python code/src/xgb_tune.py`
+
+该脚本会对以下参数做网格搜索：
+- `max_depth`
+- `learning_rate`
+- `subsample`
+- `min_child_weight`
+
+每组参数会重新训练一次 `XGBRanker`，并按验证集 `final_score` 排序输出推荐参数。
+
+注意：当前调参流程会为每个 trial 生成模型和 memmap 临时 `.dat` 文件，且 `.dat` 文件不会自动删除。搜索组合较多时可能明显增加磁盘占用，调参后建议清理 `model/60_158+39/xgb_tune/` 中不需要的 trial 文件。
+
+## 滚动窗口交叉验证
+
+可运行：
+
+`python code/src/cross_val.py`
+
+该脚本会在多个市场阶段分别训练和验证 `XGBRanker`，用于观察参数和特征方案的稳定性。
 
 # 打包docker
 在训练与测试完成之后，需要首先将项目整体打包成一个docker镜像（打包），再将该镜像导出为一个.tar文件（导出），最终提交该tar文件即可，里面需要包含运行时的所有环境及依赖，具体可以参考或修改Dockerfile
