@@ -19,7 +19,11 @@ from utils import engineer_features_39, engineer_features_158plus39
 
 def main():
     parser = argparse.ArgumentParser(description='XGBRanker Top5 推理')
-    parser.add_argument('--model-dir', default=config['output_dir'], help='模型目录，需包含模型、scaler和可选features.json')
+    parser.add_argument(
+        '--model-dir',
+        default=config['output_dir'],
+        help='模型目录，需包含 model.pkl 或 best_model.pkl、scaler.pkl 和可选 features.json',
+    )
     args = parser.parse_args()
 
     model_dir = args.model_dir
@@ -67,9 +71,10 @@ def main():
     stockid2idx = {sid: i for i, sid in enumerate(stock_ids)}
 
     # 特征工程
-    from train import feature_columns_map
+    from train import feature_columns_map, _merge_fundamentals
     feature_manifest = os.path.join(model_dir, 'features.json')
-    if os.path.exists(feature_manifest):
+    has_feature_manifest = os.path.exists(feature_manifest)
+    if has_feature_manifest:
         with open(feature_manifest, 'r', encoding='utf-8') as handle:
             features = json.load(handle)['features']
     else:
@@ -85,6 +90,8 @@ def main():
 
     processed = pd.concat(processed_list).reset_index(drop=True)
     processed['instrument'] = processed['股票代码'].map(stockid2idx)
+
+    # 筛选模型可能包含双因子交互特征；按训练时的每日截面排序重建。
     interaction_features = [feature for feature in features if feature.startswith('interaction__')]
     for interaction in interaction_features:
         parts = interaction.split('__', 2)
@@ -93,10 +100,37 @@ def main():
         left_rank = processed.groupby('日期')[parts[1]].rank(pct=True, method='average')
         right_rank = processed.groupby('日期')[parts[2]].rank(pct=True, method='average')
         processed[interaction] = left_rank * right_rank
-    processed[features] = processed[features].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
+    if has_feature_manifest:
+        # features.json 是筛选模型的完整输入清单。缺少的列只尝试从基本面文件补齐。
+        missing_features = [feature for feature in features if feature not in processed.columns]
+        if missing_features:
+            fundamental_path = os.path.join(config['data_path'], 'history_factors_nan.csv')
+            if not os.path.exists(fundamental_path):
+                fundamental_path = os.path.join(config['data_path'], 'hs300_fundamentals.csv')
+            processed, _ = _merge_fundamentals(processed, fundamental_path)
+        missing_features = [feature for feature in features if feature not in processed.columns]
+        if missing_features:
+            raise ValueError(f'模型特征在预测数据中不存在: {missing_features}')
+        processed[features] = processed[features].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    else:
+        # 保留远程 main 的默认流程：基础技术特征先标准化，再追加基本面特征。
+        processed[features] = processed[features].replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     scaler = joblib.load(scaler_path)
-    processed[features] = scaler.transform(processed[features])
+    if has_feature_manifest:
+        processed[features] = scaler.transform(processed[features])
+    else:
+        processed[features] = scaler.transform(processed[features])
+
+    # ── 合并基本面因子（与训练时一致） ──
+    if not has_feature_manifest:
+        fundamental_path = os.path.join(config['data_path'], 'history_factors_nan.csv')
+        if not os.path.exists(fundamental_path):
+            fundamental_path = os.path.join(config['data_path'], 'hs300_fundamentals.csv')
+        processed, fund_cols = _merge_fundamentals(processed, fundamental_path)
+        if fund_cols:
+            features = features + fund_cols
 
     # 展平特征
     sequence_length = config['sequence_length']
@@ -120,10 +154,10 @@ def main():
                 pad = np.zeros((flatten_days - len(feat), n_feat), dtype=np.float32)
                 feat = np.vstack([pad, feat])
             flat = feat.flatten()
-            # 市场状态
+            # 市场状态（与训练时一致的7维：6市场+1 regime，推理时填0）
             latest_date_stock = pd.to_datetime(stock_history['日期'].values[-1])
             mkt_ret = float(market_daily.get(latest_date_stock, 0.0)) if len(market_daily) > 0 else 0.0
-            mkt_feat = np.array([mkt_ret, 0.0, 0.0], dtype=np.float32)
+            mkt_feat = np.array([mkt_ret, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
             rows.append(np.concatenate([flat, mkt_feat]))
             stock_codes.append(stock_id)
 

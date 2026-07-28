@@ -20,6 +20,12 @@ wheels/
 # memmap temp files
 model/**/tmp*.dat
 
+# Temp & tool artifacts
+temp/
+.agents/
+write_probe.txt
+~$*
+
 # Legacy scripts (PyTorch era)
 code/src/lr_search.py
 code/src/optuna_search.py
