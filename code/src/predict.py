@@ -58,7 +58,7 @@ def main():
     stockid2idx = {sid: i for i, sid in enumerate(stock_ids)}
 
     # 特征工程
-    from train import feature_columns_map
+    from train import feature_columns_map, _merge_fundamentals
     features = feature_columns_map[config['feature_num']]
     feature_engineer = engineer_features_158plus39 if config['feature_num'] == '158+39' else engineer_features_39
 
@@ -75,6 +75,14 @@ def main():
 
     scaler = joblib.load(scaler_path)
     processed[features] = scaler.transform(processed[features])
+
+    # ── 合并基本面因子（与训练时一致） ──
+    fundamental_path = os.path.join(config['data_path'], 'history_factors_nan.csv')
+    if not os.path.exists(fundamental_path):
+        fundamental_path = os.path.join(config['data_path'], 'hs300_fundamentals.csv')
+    processed, fund_cols = _merge_fundamentals(processed, fundamental_path)
+    if fund_cols:
+        features = features + fund_cols
 
     # 展平特征
     sequence_length = config['sequence_length']
@@ -98,10 +106,10 @@ def main():
                 pad = np.zeros((flatten_days - len(feat), n_feat), dtype=np.float32)
                 feat = np.vstack([pad, feat])
             flat = feat.flatten()
-            # 市场状态
+            # 市场状态（与训练时一致的7维：6市场+1 regime，推理时填0）
             latest_date_stock = pd.to_datetime(stock_history['日期'].values[-1])
             mkt_ret = float(market_daily.get(latest_date_stock, 0.0)) if len(market_daily) > 0 else 0.0
-            mkt_feat = np.array([mkt_ret, 0.0, 0.0], dtype=np.float32)
+            mkt_feat = np.array([mkt_ret, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
             rows.append(np.concatenate([flat, mkt_feat]))
             stock_codes.append(stock_id)
 

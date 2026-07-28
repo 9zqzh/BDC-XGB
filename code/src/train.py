@@ -28,14 +28,14 @@ from evaluation import calculate_extended_metrics, format_eval_report
 
 feature_columns_map = {
     '39': [
-        'instrument', '开盘', '收盘', '最高', '最低', '成交量', '成交额', '振幅', '涨跌额', '换手率', '涨跌幅',
+        '开盘', '收盘', '最高', '最低', '成交量', '成交额', '振幅', '涨跌额', '换手率', '涨跌幅',
         'sma_5', 'sma_20', 'ema_12', 'ema_26', 'rsi', 'macd', 'macd_signal', 'volume_change', 'obv',
         'volume_ma_5', 'volume_ma_20', 'volume_ratio', 'kdj_k', 'kdj_d', 'kdj_j', 'boll_mid', 'boll_std',
         'atr_14', 'ema_60', 'volatility_10', 'volatility_20', 'return_1', 'return_5', 'return_10',
         'high_low_spread', 'open_close_spread', 'high_close_spread', 'low_close_spread'
     ],
     '158+39': [
-        'instrument', '开盘', '收盘', '最高', '最低', '成交量', '成交额', '振幅', '涨跌额', '换手率', '涨跌幅',
+        '开盘', '收盘', '最高', '最低', '成交量', '成交额', '振幅', '涨跌额', '换手率', '涨跌幅',
         'KMID', 'KLEN', 'KMID2', 'KUP', 'KUP2', 'KLOW', 'KLOW2', 'KSFT', 'KSFT2', 'OPEN0', 'HIGH0', 'LOW0',
         'VWAP0', 'ROC5', 'ROC10', 'ROC20', 'ROC30', 'ROC60', 'MA5', 'MA10', 'MA20', 'MA30', 'MA60', 'STD5',
         'STD10', 'STD20', 'STD30', 'STD60', 'BETA5', 'BETA10', 'BETA20', 'BETA30', 'BETA60', 'RSQR5', 'RSQR10',
@@ -129,6 +129,294 @@ def preprocess_data(df, is_train=True, stockid2idx=None):
     return _preprocess_common(df, stockid2idx, desc="特征工程", drop_small_open=True)
 
 
+# ============================================================
+#  基本面因子合并
+# ============================================================
+
+FUNDAMENTAL_COLS = ['PE_TTM', 'PB', 'ROE_approx', '总市值_对数']
+
+# ── 行业聚类映射：430+ 细分行业 → 15 大类（申万一级分类）──
+_INDUSTRY_BROAD_MAP = {
+    # 金融
+    '银行': '金融', '国有银行': '金融', '国有大型银行Ⅲ': '金融', '国有大型银': '金融',
+    '股份制银行': '金融', '股份制银行Ⅲ': '金融', '城商行Ⅲ': '金融', '农商行Ⅲ': '金融',
+    '区域性银行': '金融', '综合性银行': '金融', '其他商业银行': '金融',
+    '保险': '金融', '保险业': '金融', '财产保险': '金融', '人身保险': '金融',
+    '人寿与健康保险': '金融', '多元化保险': '金融', '财产与意外伤害保险': '金融',
+    '证券': '金融', '证券公司': '金融', '证券Ⅲ': '金融', '证券及经纪': '金融',
+    '投资银行业与经纪业': '金融', '资本市场服务': '金融', '金融控股': '金融',
+    '其他金融业': '金融', '其他金融服务': '金融', '其他综合性金融服务': '金融',
+    '多元金融': '金融', '货币金融服务': '金融', '综合性金融服务': '金融',
+    '金融交易与数据': '金融', '金融数据服务': '金融', '投资及资产管理': '金融',
+    # 食品饮料
+    '白酒': '食品饮料', '白酒Ⅲ': '食品饮料', '啤酒': '食品饮料', '乳制品': '食品饮料',
+    '乳品': '食品饮料', '调味品': '食品饮料', '调味发酵品Ⅲ': '食品饮料',
+    '调味品与食品添加剂': '食品饮料', '调味品与食用油': '食品饮料',
+    '软饮料': '食品饮料', '肉制品': '食品饮料', '包装食品与肉类': '食品饮料',
+    '食品饮料': '食品饮料', '食品制造业': '食品饮料', '食品及饲料添加剂': '食品饮料',
+    '酒精饮料': '食品饮料', '酒、饮料和精制茶制造业': '食品饮料',
+    # 医药生物
+    '医药': '医药生物', '医药生物': '医药生物', '医药制造业': '医药生物',
+    '化学药': '医药生物', '化学制剂': '医药生物', '化学原料药': '医药生物', '原料药': '医药生物',
+    '中药': '医药生物', '中成药': '医药生物', '生物制品': '医药生物',
+    '生物技术': '医药生物', '生物科技': '医药生物', '疫苗': '医药生物',
+    '医疗器械': '医药生物', '医疗设备': '医药生物', '医疗用品': '医药生物',
+    '医疗耗材': '医药生物', '体外诊断': '医药生物', '医美耗材': '医药生物',
+    '医疗服务': '医药生物', '医疗保健': '医药生物', '医疗保健机构': '医药生物',
+    '医疗保健机构与服务': '医药生物', '医疗保健设备': '医药生物',
+    '医疗研发外包': '医药生物', '医院': '医药生物', '卫生': '医药生物',
+    '医药商业': '医药生物', '医药流通': '医药生物', '药品流通': '医药生物',
+    '药品经销商': '医药生物', '药品零售': '医药生物', '药品': '医药生物',
+    '药品制剂': '医药生物', '药品及医疗器械批发业': '医药生物',
+    '制药与生物科技服务': '医药生物', '生命科学工具和服务': '医药生物',
+    '研究和试验发展': '医药生物',
+    # 电子
+    '电子': '电子', '半导体': '电子', '集成电路': '电子', '集成电路设计': '电子',
+    '集成电路制造': '电子', '集成电路封测': '电子', '数字芯片设计': '电子',
+    '模拟芯片设计': '电子', '消费电子': '电子', '消费电子产品': '电子',
+    '消费电子终端': '电子', '消费电子零部件及组装': '电子', '消费电子组件及零部件': '电子',
+    '品牌消费电子': '电子', '面板': '电子', '光电子器件': '电子',
+    '被动元件': '电子', '印制电路板': '电子', '分立器件': '电子',
+    '电子零部件制造': '电子', '电子元器件': '电子', '电子制造服务': '电子',
+    '电子设备与仪器': '电子', '电子设备及仪表制造商': '电子', '电子系统组装': '电子',
+    '其他电子': '电子', '安防设备': '电子', '安防设备及其他': '电子',
+    'LED': '电子', '视听器材': '电子',
+    # 计算机
+    '计算机': '计算机', 'IT服务': '计算机', '软件开发': '计算机',
+    '行业应用软件': '计算机', '应用软件': '计算机', '横向通用软件': '计算机',
+    '垂直应用软件': '计算机', '通用软件': '计算机', '系统集成及IT咨询': '计算机',
+    '云计算服务': '计算机', '互联网': '计算机', '互联网和相关服务': '计算机',
+    '互联网信息服务': '计算机', '互联网软件与服务': '计算机', '互动媒体': '计算机',
+    '移动互联网': '计算机', '移动互联网信息服务': '计算机', '移动互联网服务': '计算机',
+    '信息科技咨询与其他服务': '计算机', '系统开发及资讯科技顾问': '计算机',
+    '游戏': '计算机', '游戏Ⅲ': '计算机', '视频媒体': '计算机', '广告': '计算机',
+    '广告媒体': '计算机', '网络零售': '计算机', '数据中心': '计算机',
+    '软件和信息技术服务业': '计算机', '电脑硬件': '计算机', '电脑存储与外围设备': '计算机',
+    '电脑及电子设备经销商': '计算机', '电脑与外围设备': '计算机',
+    '计算机、通信和其他电子设备制造业': '计算机', '其他IT与互联网服务': '计算机',
+    '营销与广告': '计算机', '营销服务': '计算机', '其他广告营销': '计算机',
+    '其他计算机设备': '计算机',
+    # 电力设备/新能源
+    '电力设备': '电力新能源', '电池': '电力新能源', '锂电池': '电力新能源',
+    '电池化学品': '电力新能源', '电池部件及材料': '电力新能源',
+    '光伏': '电力新能源', '光伏设备': '电力新能源', '光伏电池组件': '电力新能源',
+    '光伏加工设备': '电力新能源', '逆变器': '电力新能源',
+    '风电': '电力新能源', '风力发电': '电力新能源', '风电整机': '电力新能源',
+    '风电设备': '电力新能源', '新能源': '电力新能源', '新能源发电': '电力新能源',
+    '新能源设备': '电力新能源', '储能设备': '电力新能源', '其他储能设备': '电力新能源',
+    '核电': '电力新能源', '核力发电': '电力新能源', '能源设备': '电力新能源',
+    '硅料硅片': '电力新能源', '电网自动化': '电力新能源', '电网自动化设备': '电力新能源',
+    '输变电设备': '电力新能源', '配电设备': '电力新能源', '高压设备': '电力新能源',
+    '低压设备': '电力新能源', '电气机械和器材制造业': '电力新能源',
+    '电气部件与设备': '电力新能源', '电动机与工控自动化': '电力新能源',
+    '工控自动化': '电力新能源', '工控设备': '电力新能源', '激光设备': '电力新能源',
+    '电源设备': '电力新能源', '发电设备': '电力新能源', '其他电源设备Ⅲ': '电力新能源',
+    '其他发电设备': '电力新能源', '重型电气设备': '电力新能源',
+    # 汽车
+    '汽车': '汽车', '乘用车': '汽车', '轿车': '汽车', '商用车': '汽车',
+    '商用载客车': '汽车', '综合乘用车': '汽车', '电动乘用车': '汽车',
+    '汽车零部件': '汽车', '汽车零件': '汽车', '汽车零配件': '汽车',
+    '汽车制造业': '汽车', '汽车和汽车零部件': '汽车',
+    '汽车电子': '汽车', '汽车系统部件': '汽车', '汽车内饰与外饰': '汽车',
+    '车身附件及饰件': '汽车', '轮胎': '汽车', '轮胎轮毂': '汽车',
+    '底盘与发动机系统': '汽车', '发动机与涡轮机': '汽车',
+    '商业用车及货车': '汽车',
+    # 家用电器
+    '家电': '家用电器', '家用电器': '家用电器', '白色家电': '家用电器',
+    '家庭电器': '家用电器', '空调': '家用电器', '冰箱': '家用电器',
+    '冰洗': '家用电器', '家电零部件': '家用电器', '家电零部件Ⅲ': '家用电器',
+    '家电零部件及其他': '家用电器', '视听器材': '家用电器',
+    # 机械设备
+    '机械': '机械设备', '通用机械': '机械设备', '通用设备制造业': '机械设备',
+    '其他通用机械': '机械设备', '专用设备': '机械设备', '其他专用设备': '机械设备',
+    '其他专用机械': '机械设备', '专用设备制造业': '机械设备', '其它专用机械': '机械设备',
+    '工程机械': '机械设备', '工程机械整机': '机械设备', '工程机械器件': '机械设备',
+    '重机械': '机械设备', '重型基建': '机械设备', '其他机械设备': '机械设备',
+    '锂电专用设备': '机械设备', '冶金矿采化工设备': '机械设备',
+    '制冷设备': '机械设备', '气液机械': '机械设备', '楼宇设备': '机械设备',
+    '印刷包装机械': '机械设备', '建筑工程与运输机械': '机械设备',
+    '工业地产开发和管理': '机械设备',
+    # 国防军工
+    '军工': '国防军工', '国防': '国防军工', '国防装备': '国防军工',
+    '军工电子Ⅲ': '国防军工', '航天': '国防军工', '航天装备': '国防军工',
+    '航天航空': '国防军工', '航空航天与国防': '国防军工', '航空装备': '国防军工',
+    '航空装备Ⅲ': '国防军工', '地面兵装': '国防军工', '航海装备Ⅲ': '国防军工',
+    '船舶制造': '国防军工', '船舶及其他航运设备': '国防军工',
+    '铁路、船舶、航空航天和其他运输设备制造业': '国防军工',
+    # 有色金属/钢铁
+    '有色金属': '有色钢铁', '基本金属': '有色钢铁', '稀有金属': '有色钢铁',
+    '其他稀有金属': '有色钢铁', '贵金属': '有色钢铁', '黄金': '有色钢铁',
+    '黄金及其它贵金属': '有色钢铁', '黄金及贵金属': '有色钢铁',
+    '铜': '有色钢铁', '铝': '有色钢铁', '铅锌': '有色钢铁', '钨': '有色钢铁',
+    '钨钼': '有色钢铁', '钼': '有色钢铁', '钴': '有色钢铁', '钴镍': '有色钢铁',
+    '锂': '有色钢铁', '稀土': '有色钢铁', '稀土金属': '有色钢铁',
+    '有色金属冶炼和压延加工业': '有色钢铁', '有色金属矿采选业': '有色钢铁',
+    '其它有色金属及合金': '有色钢铁',
+    '钢铁': '有色钢铁', '普钢': '有色钢铁', '特钢': '有色钢铁', '特钢Ⅲ': '有色钢铁',
+    '板材': '有色钢铁', '黑色金属冶炼和压延加工业': '有色钢铁',
+    '金属制品业': '有色钢铁', '合成金属': '有色钢铁',
+    '其他金属及矿物': '有色钢铁', '非金属采矿及制品': '有色钢铁',
+    # 化工
+    '化工': '化工', '基础化工': '化工', '化学制品': '化工',
+    '其他化学制品': '化工', '化学原料': '化工', '其他化学原料': '化工',
+    '化学原料和化学制品制造业': '化工', '化学纤维制造业': '化工',
+    '化学工程': '化工', '煤化工': '化工', '石油化工': '化工', '石化': '化工',
+    '其他石化': '化工', '炼油化工': '化工', '燃油炼制': '化工',
+    '氟化工': '化工', '氟化工及制冷剂': '化工', '有机硅': '化工',
+    '聚氨酯': '化工', '化肥': '化工', '化肥与农药': '化工',
+    '氮肥': '化工', '钾肥': '化工', '涤纶': '化工', '锦纶与涤纶': '化工',
+    '合成纤维': '化工', '纤维及树脂': '化工', '橡胶和塑料制品业': '化工',
+    # 房地产/建筑
+    '房地产': '地产建筑', '房地产开发': '地产建筑', '房地产业': '地产建筑',
+    '住宅开发': '地产建筑', '住宅房地产开发': '地产建筑', '住宅地产开发和管理': '地产建筑',
+    '商业地产': '地产建筑', '商业地产开发和管理': '地产建筑',
+    '商业物业经营': '地产建筑', '房地产租赁': '地产建筑',
+    '地产发展商': '地产建筑', '工业地产开发和管理': '地产建筑',
+    '园区': '地产建筑', '房屋建设': '地产建筑', '房屋建设Ⅲ': '地产建筑',
+    '建筑': '地产建筑', '建筑施工': '地产建筑', '建筑工程': '地产建筑',
+    '基础设施建设': '地产建筑', '基建市政工程': '地产建筑', '土木工程': '地产建筑',
+    '土木工程建筑业': '地产建筑', '路桥施工': '地产建筑', '水利工程': '地产建筑',
+    '建筑材料': '地产建筑', '水泥': '地产建筑', '水泥与混凝土': '地产建筑',
+    '玻璃纤维': '地产建筑', '玻纤': '地产建筑', '玻纤制造': '地产建筑',
+    '非金属材料': '地产建筑', '非金属新材料': '地产建筑',
+    '非金属材料Ⅲ': '地产建筑', '非金属材料与制品': '地产建筑',
+    '非金属矿物制品业': '地产建筑', '其他非金属材料': '地产建筑',
+    # 交通运输
+    '交通运输': '交通运输', '公路与铁路': '交通运输', '高速公路': '交通运输',
+    '铁路运输': '交通运输', '铁路运输业': '交通运输', '铁路设备': '交通运输',
+    '城轨铁路': '交通运输', '航空运输': '交通运输', '航空运输业': '交通运输',
+    '航空': '交通运输', '航空公司': '交通运输', '航空服务': '交通运输',
+    '航运': '交通运输', '航运及港口': '交通运输', '港口': '交通运输',
+    '港口服务': '交通运输', '水上运输': '交通运输', '水上运输业': '交通运输',
+    '物流': '交通运输', '快递': '交通运输', '跨境物流': '交通运输',
+    '交通运输仓储': '交通运输', '道路运输业': '交通运输', '邮政业': '交通运输',
+    '机场': '交通运输', '机场服务': '交通运输',
+    # 公用事业
+    '电力': '公用事业', '电力公用事业': '公用事业', '电力、热力生产和供应业': '公用事业',
+    '电力、煤气及水等公用事业': '公用事业', '火电': '公用事业', '水电': '公用事业',
+    '热电': '公用事业', '燃气': '公用事业', '燃气公用事业': '公用事业',
+    '燃气生产和供应业': '公用事业',
+    # 能源/煤炭
+    '煤炭': '能源', '煤炭开采': '能源', '煤炭开采和洗选业': '能源',
+    '动力煤': '能源', '焦炭': '能源', '石油': '能源',
+    '石油和天然气开采业': '能源', '油气开采': '能源',
+    '石油与天然气开采设备与服务': '能源', '气油生产商': '能源',
+    '综合性石油与天然气企业': '能源', '综合性石油天然气企业': '能源',
+    # 通信
+    '通信': '通信', '通信设备': '通信', '通信系统设备及组件': '通信',
+    '通信网络设备及器件': '通信', '通信传输设备': '通信', '通信终端设备': '通信',
+    '通信终端及配件': '通信', '通信终端设备及组件': '通信',
+    '通信线缆及配套': '通信', '通信技术服务': '通信',
+    '通信应用增值服务': '通信', '电讯设备': '通信',
+    '电信': '通信', '电信运营': '通信', '电信运营商': '通信', '电信运营服务': '通信',
+    '电信增值服务': '通信', '电信、广播电视和卫星传输服务': '通信',
+    '广播、电视、电影和录音制作业': '通信', '广播、电视、电影和影视录音制作业': '通信',
+    '终端设备': '通信',
+    # 传媒
+    '传媒': '传媒', '电影与娱乐': '传媒', '影视动漫': '传媒',
+    '影视动漫制作': '传媒', '文化艺术业': '传媒',
+    # 农林牧渔
+    '农林牧渔': '农林牧渔', '农业': '农林牧渔', '畜牧业': '农林牧渔',
+    '畜牧产品': '农林牧渔', '饲料': '农林牧渔', '水产饲料': '农林牧渔',
+    '农产品': '农林牧渔', '其他农产品': '农林牧渔', '生猪养殖': '农林牧渔',
+    '农副食品加工业': '农林牧渔',
+    # 消费/零售
+    '零售': '消费零售', '零售业': '消费零售', '旅游零售': '消费零售',
+    '旅游零售Ⅲ': '消费零售', '市场服务': '消费零售', '商务服务业': '消费零售',
+    '旅游': '消费零售', '旅游及观光': '消费零售', '旅行社': '消费零售',
+    # 综合/其他
+    '综合Ⅲ': '综合', '环保': '综合', '环保工程': '综合', '环保工程及服务': '综合',
+    '专业工程': '综合', '专业市场': '综合', '其他专业工程': '综合',
+    '未知': '未知',
+}
+
+
+def _map_industry_broad(industry_name):
+    """将细分行业名映射到大类。先精确匹配，再模糊匹配。"""
+    if not isinstance(industry_name, str):
+        return '未知'
+    # 精确匹配
+    if industry_name in _INDUSTRY_BROAD_MAP:
+        return _INDUSTRY_BROAD_MAP[industry_name]
+    # 模糊匹配：检查行业名是否包含已知的键
+    for key, broad in _INDUSTRY_BROAD_MAP.items():
+        if key in industry_name:
+            return broad
+    return '其他'
+
+
+def _merge_fundamentals(processed, fundamental_path):
+    """
+    将基本面因子（PE/PB/ROE/市值）按日期+股票代码合并到特征 DataFrame。
+    支持时序型基本面文件（含'日期'列）和静态快照（无'日期'列）两种格式。
+    """
+    if not os.path.exists(fundamental_path):
+        print(f"  ⚠ 基本面数据不存在: {fundamental_path}，跳过合并")
+        return processed, []
+
+    fund_df = pd.read_csv(fundamental_path, dtype={'股票代码': str})
+    fund_df['股票代码'] = fund_df['股票代码'].astype(str).str.zfill(6)
+    # 确保 processed 的股票代码也是字符串（cross_val 切片可能产生 int64）
+    processed['股票代码'] = processed['股票代码'].astype(str).str.zfill(6)
+    # 确保日期列存在且格式统一
+    if '日期' in processed.columns:
+        processed['_date_merge'] = pd.to_datetime(processed['日期']).dt.strftime('%Y-%m-%d')
+    if '日期' in fund_df.columns:
+        fund_df['_date_merge'] = pd.to_datetime(fund_df['日期'], errors='coerce').dt.strftime('%Y-%m-%d')
+
+    available_cols = [c for c in FUNDAMENTAL_COLS if c in fund_df.columns]
+    if not available_cols:
+        return processed, []
+
+    # 行业 one-hot 编码（先映射到大类，避免 430 维过拟合）
+    if '行业' in fund_df.columns:
+        fund_df['行业_大类'] = fund_df['行业'].fillna('未知').apply(_map_industry_broad)
+        industry_dummies = pd.get_dummies(fund_df['行业_大类'], prefix='行业')
+        fund_df = fund_df.join(industry_dummies)
+        available_cols += list(industry_dummies.columns)
+        broad_count = industry_dummies.shape[1]
+        print(f"  行业聚类: {fund_df['行业'].nunique()} 细分 → {broad_count} 大类")
+
+    # 合并：如果两边都有日期则按时序合并，否则按静态快照合并
+    merge_keys = ['股票代码']
+    if '_date_merge' in processed.columns and '_date_merge' in fund_df.columns:
+        merge_keys.append('_date_merge')
+        print(f"  基本面合并模式: 时序对齐 (按股票+日期)")
+    else:
+        print(f"  基本面合并模式: 静态快照 (按股票代码)")
+
+    processed = processed.merge(
+        fund_df[merge_keys + available_cols],
+        on=merge_keys, how='left'
+    )
+
+    # 清洗：负值→NaN，再按股票前向填充
+    for c in available_cols:
+        if c in processed.columns:
+            processed[c] = pd.to_numeric(processed[c], errors='coerce')
+            if c not in ('ROE_approx',):  # ROE 可正可负
+                processed[c] = processed[c].mask(processed[c] <= 0)
+
+    # 按股票前向填充缺失的基本面数据
+    n_before = processed[available_cols].isna().sum().sum() if available_cols else 0
+    for c in available_cols:
+        if c in processed.columns:
+            processed[c] = processed.groupby('股票代码')[c].ffill()
+    n_after = processed[available_cols].isna().sum().sum() if available_cols else 0
+
+    # 仍缺失的填0
+    for c in available_cols:
+        if c in processed.columns:
+            processed[c] = processed[c].fillna(0.0)
+
+    # 清理临时列
+    if '_date_merge' in processed.columns:
+        processed.drop(columns=['_date_merge'], inplace=True)
+
+    print(f"  已合并基本面因子: {available_cols} (前向填充: {n_before}→{n_after} NaN)")
+    return processed, available_cols
+
+
 def preprocess_val_data(df, stockid2idx=None):
     return _preprocess_common(df, stockid2idx, desc="验证集特征工程", drop_small_open=True)
 
@@ -161,21 +449,42 @@ def flatten_sequences_to_xgb(data, features, sequence_length, flatten_days=None)
     date2qid = {d: i for i, d in enumerate(valid_dates)}
 
     n_feat = len(features)
-    feat_dim = flatten_days * n_feat + 3  # +3 市场状态特征
+    feat_dim = flatten_days * n_feat + 7  # +7 市场状态特征（6维 + 1维 regime 方向）
 
-    # ── 预计算市场状态特征 ──
+    # ── 预计算市场状态特征（短窗口+长窗口） ──
     print("正在计算市场状态特征...")
     market_daily = data.groupby('日期')['label'].mean().sort_index()
     market_returns = market_daily.values
-    # 20日波动率 + 60日累计趋势
-    market_vol = pd.Series(market_returns, index=market_daily.index).rolling(20, min_periods=5).std().values
-    market_trend = pd.Series(market_returns, index=market_daily.index).rolling(60, min_periods=10).sum().values
+    mkt = pd.Series(market_returns, index=market_daily.index)
+    # 短窗口：5日收益均值、5日波动率、10日波动率
+    mkt_ret_5d = mkt.rolling(5, min_periods=3).mean().values
+    mkt_vol_5d = mkt.rolling(5, min_periods=3).std().values
+    mkt_vol_10d = mkt.rolling(10, min_periods=5).std().values
+    # 长窗口：20日波动率、60日趋势、当日收益
+    mkt_vol_20d = mkt.rolling(20, min_periods=5).std().values
+    mkt_trend_60d = mkt.rolling(60, min_periods=10).sum().values
     date2market = {}
     for i, d in enumerate(market_daily.index):
+        trend_60d = float(mkt_trend_60d[i]) if not np.isnan(mkt_trend_60d[i]) else 0.0
+        # regime 方向编码（60日累计收益 → 5档）
+        if trend_60d > 0.05:
+            regime = 2.0   # 强牛市
+        elif trend_60d > 0.02:
+            regime = 1.0   # 牛市
+        elif trend_60d < -0.05:
+            regime = -2.0  # 强熊市
+        elif trend_60d < -0.02:
+            regime = -1.0  # 熊市
+        else:
+            regime = 0.0   # 震荡
         date2market[d] = (
-            float(market_returns[i]),
-            float(market_vol[i]) if not np.isnan(market_vol[i]) else 0.0,
-            float(market_trend[i]) if not np.isnan(market_trend[i]) else 0.0,
+            float(market_returns[i]),                                               # 当日全市场收益
+            float(mkt_vol_5d[i]) if not np.isnan(mkt_vol_5d[i]) else 0.0,           # 5日波动率
+            float(mkt_ret_5d[i]) if not np.isnan(mkt_ret_5d[i]) else 0.0,           # 5日均收益
+            float(mkt_vol_10d[i]) if not np.isnan(mkt_vol_10d[i]) else 0.0,         # 10日波动率
+            float(mkt_vol_20d[i]) if not np.isnan(mkt_vol_20d[i]) else 0.0,         # 20日波动率(保留)
+            trend_60d,                                                                # 60日趋势(保留)
+            regime,                                                                   # 市场方向(新增)
         )
 
     # ── 第一遍：统计总样本数 ──
@@ -209,10 +518,10 @@ def flatten_sequences_to_xgb(data, features, sequence_length, flatten_days=None)
         }
 
     # ── 第二遍：按日期顺序遍历，天然保证 qid 有序 ──
-    print(f"正在展平时序特征（最后{flatten_days}天 × {n_feat}维 + 3市场 = {feat_dim:,}维，memmap 模式）...")
+    print(f"正在展平时序特征（最后{flatten_days}天 × {n_feat}维 + 7市场 = {feat_dim:,}维，memmap 模式）...")
     write_pos = 0
     for q, d in enumerate(tqdm(valid_dates, desc="展平特征")):
-        mkt_feat = date2market.get(d, (0.0, 0.0, 0.0))
+        mkt_feat = date2market.get(d, (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
         for stock, grp in stock_groups.items():
             idx = np.where(grp['dates'] == d)[0]
             if len(idx) == 0:
@@ -408,6 +717,16 @@ def train_one_window(train_df, val_df, val_start, stockid2idx, num_stocks, confi
     val_data[features_list] = scaler.transform(val_data[features_list])
     joblib.dump(scaler, os.path.join(output_dir, 'scaler.pkl'))
 
+    # ── 合并基本面因子 ──
+    # 优先使用时序基本面文件，回退到静态快照
+    fundamental_path = os.path.join(config['data_path'], 'history_factors_nan.csv')
+    if not os.path.exists(fundamental_path):
+        fundamental_path = os.path.join(config['data_path'], 'hs300_fundamentals.csv')
+    train_data, fund_cols = _merge_fundamentals(train_data, fundamental_path)
+    if fund_cols:
+        val_data, _ = _merge_fundamentals(val_data, fundamental_path)
+        features_list = features_list + fund_cols
+
     # ── 展平特征 ──
     X_train, y_train_cont, qid_train, _, _, valid_train_dates = flatten_sequences_to_xgb(
         train_data, features_list, sequence_length
@@ -464,10 +783,11 @@ def train_one_window(train_df, val_df, val_start, stockid2idx, num_stocks, confi
     importance = model.feature_importances_
     top_idx = np.argsort(importance)[-20:][::-1]
     n_feat_per_day = len(features_list)
-    print(f"\n特征重要性 Top20 (共{len(importance)}维, 每{n_feat_per_day}维=1天特征, 最后3维=市场状态):")
+    print(f"\n特征重要性 Top20 (共{len(importance)}维, 每{n_feat_per_day}维=1天特征, 后7维=市场状态):")
     for rank, idx in enumerate(top_idx):
-        if idx >= len(importance) - 3:
-            label = ["市场均值", "市场波动率", "市场趋势"][idx - (len(importance) - 3)]
+        if idx >= len(importance) - 7:
+            labels_7 = ["市场_当日", "市场_5日波动", "市场_5日均", "市场_10日波动", "市场_20日波动", "市场_60日趋势", "市场_regime"]
+            label = labels_7[idx - (len(importance) - 7)]
         else:
             day = idx // n_feat_per_day + 1
             f_idx = idx % n_feat_per_day

@@ -95,12 +95,35 @@ def run_cross_validation(windows, config, base_output_dir=None):
     return all_results
 
 
+def _compute_reliability_weight(valid_days):
+    """根据验证天数计算可靠性权重。>=20天=1.0, 10~19天=0.5, <10天=0.3。"""
+    if valid_days is None or np.isnan(valid_days):
+        return 1.0, '未知'
+    valid_days = int(valid_days)
+    if valid_days >= 20:
+        return 1.0, '正常'
+    elif valid_days >= 10:
+        return 0.5, '偏低'
+    else:
+        return 0.3, '不足'
+
+
 def generate_summary_report(all_results, output_path):
-    """生成滚动窗口交叉验证汇总报告。"""
+    """生成滚动窗口交叉验证汇总报告（含可靠性加权）。"""
     valid_results = [r for r in all_results if 'error' not in r]
     if len(valid_results) == 0:
         print("没有成功的窗口，无法生成汇总报告")
         return
+
+    # 计算每个窗口的可靠性权重
+    weights = []
+    weight_labels = []
+    for r in valid_results:
+        vd = r.get('valid_days', r.get('total_days', None))
+        w, label = _compute_reliability_weight(vd)
+        weights.append(w)
+        weight_labels.append(label)
+    total_weight = sum(weights) if weights else len(valid_results)
 
     metric_keys = [
         'final_score', 'topk_hit_rate', 'spearman_rho', 'win_rate',
@@ -109,37 +132,56 @@ def generate_summary_report(all_results, output_path):
 
     lines = []
     lines.append("")
-    lines.append("=" * 80)
-    lines.append("               滚动窗口交叉验证汇总报告 (XGBRanker)")
-    lines.append("=" * 80)
+    lines.append("=" * 95)
+    lines.append("               滚动窗口交叉验证汇总报告 (XGBRanker)  [加权版]")
+    lines.append("=" * 95)
 
+    # 表头
     header = f"{'指标':<20}"
     for r in valid_results:
         label_short = r['label'].split('_')[-1] if '_' in r['label'] else r['label']
         header += f" {label_short:>10}"
-    header += f" {'均值':>10}  {'标准差':>10}"
+    header += f" {'加权均值':>10}  {'标准差':>10}"
     lines.append(header)
-    lines.append("-" * 80)
+
+    # 验证天数和权重行
+    days_row = f"{'验证天数':<20}"
+    for r in valid_results:
+        vd = r.get('valid_days', r.get('total_days', '?'))
+        days_row += f" {str(vd):>10}"
+    days_row += f" {'—':>10}  {'—':>10}"
+    lines.append(days_row)
+
+    weight_row = f"{'可靠性权重':<20}"
+    for w, wl in zip(weights, weight_labels):
+        weight_row += f" {w:>8.1f}({wl})"
+    weight_row += f" {'—':>10}  {'—':>10}"
+    lines.append(weight_row)
+    lines.append("-" * 95)
 
     stats = {}
     for key in metric_keys:
         values = []
-        for r in valid_results:
+        w_values = []
+        for i, r in enumerate(valid_results):
             val = r.get(key, float('nan'))
             if isinstance(val, (int, float)) and not np.isnan(val):
                 values.append(val)
+                w_values.append(val * weights[i])
         if len(values) == 0:
             continue
-        mean_val = np.mean(values)
-        std_val = np.std(values, ddof=1) if len(values) > 1 else 0.0
+        weighted_mean = sum(w_values) / total_weight if total_weight > 0 else np.mean(values)
+        weighted_var_sum = sum(w * (v - weighted_mean) ** 2 for v, w in zip(values, weights))
+        weighted_std = np.sqrt(weighted_var_sum / total_weight) if total_weight > 0 else np.std(values, ddof=1)
+
         row = f"{key:<20}"
         for v in values:
             row += f" {v:>10.4f}"
-        row += f" {mean_val:>10.4f}  {std_val:>10.4f}"
+        row += f" {weighted_mean:>10.4f}  {weighted_std:>10.4f}"
         lines.append(row)
-        stats[key] = {'mean': mean_val, 'std': std_val, 'values': values}
+        stats[key] = {'mean': weighted_mean, 'std': weighted_std, 'values': values, 'weights': weights}
 
-    lines.append("-" * 80)
+    lines.append("-" * 95)
 
     if 'final_score' in stats:
         fs_vals = stats['final_score']['values']
@@ -156,9 +198,20 @@ def generate_summary_report(all_results, output_path):
             stability = "配置一般稳定，存在一定窗口差异"
         else:
             stability = "配置不稳定，窗口间差异较大，建议检查超参数"
-        lines.append(f"稳定性判断：final_score 标准差 / 均值 = {cv*100:.2f}%，{stability}")
+        lines.append(f"稳定性判断（加权）：final_score 标准差 / 均值 = {cv*100:.2f}%，{stability}")
 
-    lines.append("=" * 80)
+    # 低可靠性窗口标注
+    low_reliability_windows = [
+        r['label'] for r, wl in zip(valid_results, weight_labels) if wl != '正常'
+    ]
+    if low_reliability_windows:
+        lines.append(f"\n⚠ 以下窗口验证天数不足，指标仅供参考：")
+        for r, wl in zip(valid_results, weight_labels):
+            if wl != '正常':
+                vd = r.get('valid_days', r.get('total_days', '?'))
+                lines.append(f"   · {r['label']}: 验证{vd}天，权重{weights[valid_results.index(r)]:.1f}")
+
+    lines.append("=" * 95)
     report = '\n'.join(lines)
     print(report)
     with open(output_path, 'w', encoding='utf-8') as f:
