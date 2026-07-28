@@ -1,3 +1,6 @@
+import os
+
+
 # 配置参数
 sequence_length = 60
 feature_num = '158+39'
@@ -27,6 +30,13 @@ xgb_config = {
     'early_stopping_rounds': 30, # XGBoost 自带早停
     'verbosity': 1,              # 训练日志级别
     'n_jobs': -1,                # 并行线程数
+}
+
+# 特征筛选会重复训练多个 XGBRanker，默认按 RTX 5060 级别显卡使用 CUDA。
+# 无 CUDA 环境运行前设置：$env:BDC_XGB_DEVICE = 'cpu'
+feature_selection_config = {
+    'device': os.getenv('BDC_XGB_DEVICE', 'cuda').strip().lower(),
+    'n_jobs': int(os.getenv('BDC_XGB_N_JOBS', '4')),
 }
 
 # ============ 验证增强配置 ============

@@ -19,7 +19,7 @@ SRC_DIR = ROOT / "code" / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from config import config, config_extended, xgb_config  # noqa: E402
+from config import config, config_extended, feature_selection_config, xgb_config  # noqa: E402
 from train import (  # noqa: E402
     _continuous_labels_to_ranks,
     evaluate_xgb_model,
@@ -125,8 +125,9 @@ def train_window(
         "eval_metric": xgb_config["eval_metric"],
         "ndcg_exp_gain": False,
         "verbosity": 0,
-        "n_jobs": xgb_config["n_jobs"],
+        "n_jobs": feature_selection_config["n_jobs"],
         "tree_method": "hist",
+        "device": feature_selection_config["device"],
         "random_state": 42,
     }
     model = xgb.XGBRanker(**params)

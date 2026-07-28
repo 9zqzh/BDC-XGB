@@ -13,6 +13,35 @@ uv sync
 Rank IC / ICIR -> Refitting -> 双因子 25 组 -> 滚动窗口 final_score
 ```
 
+## 运行配置（RTX 5060 级别 GPU）
+
+特征筛选中的 XGBRanker 默认使用 CUDA：`tree_method=hist`、`device=cuda`，默认使用4个 CPU 线程配合 GPU。RTX 5060 8GB 显存可先使用默认配置；流程按窗口和实验顺序执行，不会同时启动多个 XGBoost 模型。
+
+首次运行前检查 GPU：
+
+```powershell
+uv run python -c "import xgboost as xgb; print(xgb.__version__); print(xgb.build_info())"
+nvidia-smi
+```
+
+运行特征筛选：
+
+```powershell
+$env:BDC_XGB_DEVICE = "cuda"
+$env:BDC_XGB_N_JOBS = "4"
+uv run python "Feature Selection/run_selection.py" --step all
+```
+
+如果对方没有可用 CUDA，必须切换到 CPU：
+
+```powershell
+$env:BDC_XGB_DEVICE = "cpu"
+$env:BDC_XGB_N_JOBS = "-1"
+uv run python "Feature Selection/run_selection.py" --step all
+```
+
+`rank_ic` 和 `double_sort` 主要由 Pandas 执行，GPU 加速有限；GPU 主要用于 `refitting` 和 `rolling` 中反复训练 XGBRanker。显存不足时，优先将 `BDC_XGB_N_JOBS` 调为 `2`，并减少同时运行的其他 GPU 程序。
+
 ## 1. Rank IC / ICIR
 
 ```powershell

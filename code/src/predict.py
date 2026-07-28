@@ -4,6 +4,8 @@ XGBRanker 推理预测脚本
 """
 
 import os
+import argparse
+import json
 import multiprocessing as mp
 
 import joblib
@@ -16,9 +18,16 @@ from utils import engineer_features_39, engineer_features_158plus39
 
 
 def main():
+    parser = argparse.ArgumentParser(description='XGBRanker Top5 推理')
+    parser.add_argument('--model-dir', default=config['output_dir'], help='模型目录，需包含模型、scaler和可选features.json')
+    args = parser.parse_args()
+
+    model_dir = args.model_dir
     data_file = os.path.join(config['data_path'], 'train.csv')
-    model_path_pkl = os.path.join(config['output_dir'], 'best_model.pkl')
-    scaler_path = os.path.join(config['output_dir'], 'scaler.pkl')
+    model_path_pkl = os.path.join(model_dir, 'model.pkl')
+    if not os.path.exists(model_path_pkl):
+        model_path_pkl = os.path.join(model_dir, 'best_model.pkl')
+    scaler_path = os.path.join(model_dir, 'scaler.pkl')
     output_path = os.path.join('./output/', 'result.csv')
     hs300_path = os.path.join(config['data_path'], 'hs300_stock_list.csv')
 
@@ -59,7 +68,12 @@ def main():
 
     # 特征工程
     from train import feature_columns_map
-    features = feature_columns_map[config['feature_num']]
+    feature_manifest = os.path.join(model_dir, 'features.json')
+    if os.path.exists(feature_manifest):
+        with open(feature_manifest, 'r', encoding='utf-8') as handle:
+            features = json.load(handle)['features']
+    else:
+        features = feature_columns_map[config['feature_num']]
     feature_engineer = engineer_features_158plus39 if config['feature_num'] == '158+39' else engineer_features_39
 
     raw_df = raw_df.sort_values(['股票代码', '日期']).reset_index(drop=True)
@@ -71,6 +85,14 @@ def main():
 
     processed = pd.concat(processed_list).reset_index(drop=True)
     processed['instrument'] = processed['股票代码'].map(stockid2idx)
+    interaction_features = [feature for feature in features if feature.startswith('interaction__')]
+    for interaction in interaction_features:
+        parts = interaction.split('__', 2)
+        if len(parts) != 3 or parts[1] not in processed or parts[2] not in processed:
+            raise ValueError(f'交互特征依赖不存在: {interaction}')
+        left_rank = processed.groupby('日期')[parts[1]].rank(pct=True, method='average')
+        right_rank = processed.groupby('日期')[parts[2]].rank(pct=True, method='average')
+        processed[interaction] = left_rank * right_rank
     processed[features] = processed[features].replace([np.inf, -np.inf], np.nan).fillna(0.0)
 
     scaler = joblib.load(scaler_path)
