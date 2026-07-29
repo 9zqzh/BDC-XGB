@@ -68,21 +68,11 @@ def _spearman_numpy(a, b):
 def _evaluate_day_with_postprocess(day_preds, day_labels, day_stocks, k=5, min_gap=0.005, postproc_params=None):
     """
     对单日预测应用置信度驱动后处理，计算评估指标。
-
-    与等权 TopK 不同：后处理可能选取少于 k 只股票，权重也不均等。
-    因此 final_score 公式中的 random_return_sum 需根据实际选取数量调整。
-
-    Args:
-        postproc_params: dict, 传递给 confidence_aware_postprocess 的 params 参数
-
-    Returns:
-        dict: 当日指标（含 final_score, topk_hit, spearman, win 等）
     """
     n = len(day_preds)
     if n < k:
         return None
 
-    # 真实 TopK 的最大收益和随机收益（用于 final_score 分母）
     true_topk_idx = np.argsort(day_labels)[::-1][:k]
     max_return_sum = float(day_labels[true_topk_idx].sum())
     random_return_sum = float(k * day_labels.mean())
@@ -90,7 +80,6 @@ def _evaluate_day_with_postprocess(day_preds, day_labels, day_stocks, k=5, min_g
     if abs(gap) < min_gap:
         return None
 
-    # ── 置信度驱动后处理 ──
     selected_stocks, weights, conf_info = confidence_aware_postprocess(
         day_preds, day_stocks, top_k=k, params=postproc_params
     )
@@ -98,31 +87,25 @@ def _evaluate_day_with_postprocess(day_preds, day_labels, day_stocks, k=5, min_g
     if len(selected_stocks) == 0:
         return None
 
-    # 找到选中股票在数组中的索引
     stock_to_idx = {s: i for i, s in enumerate(day_stocks)}
     selected_idx = np.array([stock_to_idx[s] for s in selected_stocks])
 
-    # 加权收益
     selected_labels = day_labels[selected_idx]
     pred_return_sum = float(np.dot(weights, selected_labels))
 
-    # TopK 命中率（选中的股票中有多少在真实 TopK 中）
     true_topk_set = set(true_topk_idx)
     pred_set = set(selected_idx)
     hit_count = len(true_topk_set & pred_set)
-    topk_hit = hit_count
 
-    # Spearman
     spearman = _spearman_numpy(day_preds, day_labels)
 
-    # Win rate（选中股票均收益 vs 全市场均收益）
     market_mean = float(day_labels.mean())
     model_mean = float(selected_labels.mean())
     win = 1.0 if model_mean > market_mean else 0.0
 
     return {
         'final_score': (pred_return_sum - random_return_sum) / (gap + 1e-12),
-        'topk_hit': topk_hit,
+        'topk_hit': hit_count,
         'spearman': spearman,
         'win': win,
         'pred_ret': model_mean,
@@ -133,13 +116,14 @@ def _evaluate_day_with_postprocess(day_preds, day_labels, day_stocks, k=5, min_g
     }
 
 
-def run_single_roll(train_df, val_df, stockid2idx, roll_idx, config_override=None):
+def run_single_roll(train_df, val_df, val_dates, stockid2idx, roll_idx, config_override=None):
     """
     执行单次滚动训练 + 置信度驱动后处理评估。
 
     Args:
         train_df: 训练集 DataFrame
-        val_df: 验证集 DataFrame
+        val_df: 验证集 DataFrame（含上下文：向前60天序列窗口 + 向后5天标签 horizon）
+        val_dates: 实际验证日期列表（用于从上下文中过滤出仅验证日的 qid）
         stockid2idx: 股票代码→整数映射
         roll_idx: 滚动编号（用于日志）
         config_override: 可选的后处理参数覆盖 dict
@@ -159,7 +143,6 @@ def run_single_roll(train_df, val_df, stockid2idx, roll_idx, config_override=Non
     train_data, _ = preprocess_data(train_df, is_train=True, stockid2idx=stockid2idx)
     val_data, _ = preprocess_val_data(val_df, stockid2idx=stockid2idx)
 
-    # 检查特征工程后数据是否为空（验证集在数据末尾可能因缺少未来标签而被全部丢弃）
     if len(train_data) == 0:
         return {'final_score': 0.0, 'error': 'empty_train_data'}
     if len(val_data) == 0:
@@ -200,6 +183,23 @@ def run_single_roll(train_df, val_df, stockid2idx, roll_idx, config_override=Non
 
     if len(X_train) == 0 or len(X_val) == 0:
         return {'final_score': 0.0, 'error': 'empty_data'}
+
+    # ── 5.5 过滤验证 qid：只保留实际验证日期（排除上下文日期） ──
+    if val_dates is not None and len(val_dates) > 0:
+        val_dates_set = set(pd.to_datetime(val_dates))
+        val_qid_set = set()
+        for i, d in enumerate(valid_val_dates):
+            if pd.to_datetime(d) in val_dates_set:
+                val_qid_set.add(i)
+        if val_qid_set:
+            mask = np.array([q in val_qid_set for q in qid_val])
+            X_val = X_val[mask]
+            y_val_cont = y_val_cont[mask]
+            qid_val = qid_val[mask]
+        else:
+            return {'final_score': 0.0, 'error': 'no_qid_in_val_window'}
+    if len(X_val) == 0:
+        return {'final_score': 0.0, 'error': 'empty_val_after_filter'}
 
     # ── 6. 标签转换 ──
     y_train = _continuous_labels_to_ranks(y_train_cont, qid_train)
@@ -244,13 +244,6 @@ def run_single_roll(train_df, val_df, stockid2idx, roll_idx, config_override=Non
         day_preds = preds[mask].astype(np.float64)
         day_labels = y_val_cont[mask].astype(np.float64)
 
-        # 获取股票代码：通过 instrument 列
-        val_sub = val_data[val_data['instrument'].isin(
-            np.unique(qid_val[mask])  # 这里需要通过索引找到对应的股票
-        )]
-
-        # 由于展平后失去了股票代码列，我们需要另一种方式获取
-        # 简化处理：用整数编码作为股票标识
         n_day = len(day_preds)
         day_stocks = [f"s{i}" for i in range(n_day)]
 
@@ -288,9 +281,6 @@ def run_single_roll(train_df, val_df, stockid2idx, roll_idx, config_override=Non
 def run_rolling_validation(config_override=None):
     """
     执行完整50次滚动验证，汇总结果。
-
-    性能注意：50次独立训练，每次260天数据，预期耗时较长（取决于硬件）。
-    建议在后台运行。
     """
     set_seed(42)
 
@@ -305,7 +295,6 @@ def run_rolling_validation(config_override=None):
     print(f"数据范围: {all_dates[0].date()} ~ {all_dates[-1].date()}, 共 {total_dates} 个交易日")
     print(f"滚动参数: 训练{TRAIN_DAYS}天, 验证{VAL_DAYS}天, 步长{STEP_DAYS}天, 共{N_ROLLS}次")
 
-    # 预计算滚动窗口边界
     max_start = total_dates - TRAIN_DAYS - VAL_DAYS - N_ROLLS * STEP_DAYS
     if max_start < 0:
         actual_rolls = (total_dates - TRAIN_DAYS - VAL_DAYS) // STEP_DAYS
@@ -317,7 +306,6 @@ def run_rolling_validation(config_override=None):
     results = []
 
     for roll in range(n_rolls):
-        # 计算窗口：从最新日期向前推
         train_end_idx = total_dates - VAL_DAYS - roll * STEP_DAYS
         train_start_idx = train_end_idx - TRAIN_DAYS
 
@@ -329,25 +317,32 @@ def run_rolling_validation(config_override=None):
         val_dates = all_dates[train_end_idx:train_end_idx + VAL_DAYS]
 
         train_df = full_df[full_df['日期'].isin(train_dates)].copy()
-        val_df = full_df[full_df['日期'].isin(val_dates)].copy()
 
-        if len(train_df) == 0 or len(val_df) == 0:
+        # 验证集需包含足够上下文：向前60天（序列窗口）+ 向后5天（标签 horizon）
+        LABEL_HORIZON = 5
+        SEQ_CTX = config['sequence_length']
+        val_ctx_start = max(0, train_end_idx - SEQ_CTX)
+        val_ctx_end = min(total_dates, train_end_idx + VAL_DAYS + LABEL_HORIZON)
+        ctx_val_dates = all_dates[val_ctx_start:val_ctx_end]
+        ctx_val_df = full_df[full_df['日期'].isin(ctx_val_dates)].copy()
+
+        if len(train_df) == 0 or len(ctx_val_df) == 0:
             continue
 
         train_df['日期'] = train_df['日期'].dt.strftime('%Y-%m-%d')
-        val_df['日期'] = val_df['日期'].dt.strftime('%Y-%m-%d')
+        ctx_val_df['日期'] = ctx_val_df['日期'].dt.strftime('%Y-%m-%d')
 
-        all_sids = sorted(set(train_df['股票代码'].unique()) | set(val_df['股票代码'].unique()))
+        all_sids = sorted(set(train_df['股票代码'].unique()) | set(ctx_val_df['股票代码'].unique()))
         stockid2idx = {s: i for i, s in enumerate(all_sids)}
 
         print(f"\n[滚动 {roll+1}/{n_rolls}] "
               f"训练: {train_dates[0].date()}~{train_dates[-1].date()} "
               f"({len(train_dates)}天), "
               f"验证: {val_dates[0].date()}~{val_dates[-1].date()} "
-              f"({len(val_dates)}天)")
+              f"({len(val_dates)}天, 上下文共{len(ctx_val_dates)}天)")
 
         result = run_single_roll(
-            train_df, val_df, stockid2idx, roll,
+            train_df, ctx_val_df, val_dates, stockid2idx, roll,
             config_override=config_override
         )
 
@@ -362,7 +357,7 @@ def run_rolling_validation(config_override=None):
             print(f"  → 失败: {result['error']}")
             results.append({'final_score': 0.0, 'error': result['error']})
 
-        del train_df, val_df
+        del train_df, ctx_val_df
         gc.collect()
 
     # ── 汇总 ──
@@ -374,7 +369,6 @@ def run_rolling_validation(config_override=None):
     fs_values = [r['final_score'] for r in valid_results]
     win_weeks = sum(1 for fs in fs_values if fs > 0)
 
-    # 最长连续亏损
     max_consec_loss = 0
     current_loss = 0
     for fs in fs_values:
@@ -418,18 +412,13 @@ def run_rolling_validation(config_override=None):
 def tune_postprocess_params():
     """
     对置信度驱动后处理的超参数做网格搜索。
-
-    搜索空间：confidence_gap 阈值 × temperature × z_threshold
-    每个组合跑全部50次滚动验证，选综合最优。
-
-    警告：计算量极大（每组合≈50次训练），建议在 GPU/多核机器上运行。
+    警告：计算量极大，建议在 GPU/多核机器上运行。
     """
-    # 定义参数搜索空间
     from itertools import product
 
-    gap_thresholds = [0.5, 1.0, 1.5, 2.0]      # 高/中/低置信度分界
-    temperatures = [0.5, 0.7, 1.0, 1.5]          # softmax 温度
-    z_thresholds = [0.5, 1.0, 1.5]                # z-score 入选阈值
+    gap_thresholds = [0.5, 1.0, 1.5, 2.0]
+    temperatures = [0.5, 0.7, 1.0, 1.5]
+    z_thresholds = [0.5, 1.0, 1.5]
 
     param_combos = list(product(gap_thresholds, temperatures, z_thresholds))
     print(f"后处理参数搜索: {len(param_combos)} 组合")
@@ -442,7 +431,6 @@ def tune_postprocess_params():
     for idx, (gap, temp, z_thresh) in enumerate(param_combos):
         print(f"\n[{idx+1}/{len(param_combos)}] gap={gap}, temp={temp}, z_thresh={z_thresh}")
 
-        # 构建后处理参数
         postproc_params = {
             'gap_thresholds': [gap, gap * 0.5, gap * 0.25],
             'temperatures': [temp, temp * 0.7, temp * 0.3, temp * 0.1],
@@ -451,13 +439,11 @@ def tune_postprocess_params():
         }
 
         config_override = postproc_params
-
         summary, _ = run_rolling_validation(config_override=config_override)
 
         if summary is None:
             continue
 
-        # 综合评分：正收益比例 × 2 + 平均fs × 10 - 最长连亏
         composite = (
             summary['positive_ratio'] * 2.0
             + summary['mean_final_score'] * 10.0
@@ -490,19 +476,16 @@ def tune_postprocess_params():
 def compare_features():
     """
     特征筛选 A/B 对比：全量特征 vs IC筛选后特征。
-    分别跑50次滚动验证，对比正收益比例和稳定性。
     """
     print("=" * 60)
     print("  特征筛选 A/B 对比")
     print("=" * 60)
 
-    # ── A组：全量特征 ──
-    print("\n[A组] 全量特征（不筛选）...")
     original_selected = config.get('selected_features')
     config['selected_features'] = None
+    print("\n[A组] 全量特征（不筛选）...")
     summary_a, results_a = run_rolling_validation()
 
-    # ── B组：IC筛选后特征 ──
     config['selected_features'] = original_selected
     if config.get('selected_features') is None:
         print("\n[B组] 跳过: 请先运行 factor_ic.py 并将显著因子填入 config.py 的 selected_features")
@@ -511,7 +494,6 @@ def compare_features():
     print(f"\n[B组] IC筛选特征（{len(config['selected_features'])} 个因子）...")
     summary_b, results_b = run_rolling_validation()
 
-    # ── 对比 ──
     if summary_a and summary_b:
         print(f"\n{'='*60}")
         print(f"  A/B 对比结果")
@@ -547,7 +529,6 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.n_rolls != N_ROLLS:
-        # 允许命令行覆盖滚动次数
         import builtins
         N_ROLLS = args.n_rolls
 
