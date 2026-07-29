@@ -202,12 +202,26 @@ def engineer_features(df):
         slope = talib.LINEARREG_SLOPE(close, timeperiod=w)
         features.append(slope / (close + 1e-12))
         feature_names.append(f'BETA{w}')
-        
-        # R-squared can be calculated as CORREL^2
+
+        # R-squared: 使用 rolling apply 计算线性回归的拟合优度
+        # 原代码有索引对齐 bug (time_period_series 只有 w 个元素)
+        # _w=w 用默认参数锁定当前窗口长度，避免闭包延迟绑定陷阱
+        def _rsqr(y, _w=w):
+            """计算 y 对时间 [0,1,...,_w-1] 的 R-squared"""
+            if len(y) < _w or np.any(np.isnan(y)):
+                return np.nan
+            x = np.arange(_w, dtype=float)
+            x_mean = x.mean()
+            y_mean = y.mean()
+            ss_xx = ((x - x_mean) ** 2).sum()
+            ss_yy = ((y - y_mean) ** 2).sum()
+            if ss_yy < 1e-12:
+                return np.nan
+            ss_xy = ((x - x_mean) * (y - y_mean)).sum()
+            return (ss_xy ** 2) / (ss_xx * ss_yy)
+
         if len(close) >= w:
-            time_period_series = pd.Series(range(w), index=close.index[:w])
-            rolling_corr = close.rolling(w).corr(time_period_series)
-            rsquare = rolling_corr**2
+            rsquare = close.rolling(w).apply(_rsqr, raw=True)
         else:
             rsquare = pd.Series(np.nan, index=close.index)
         features.append(rsquare)
