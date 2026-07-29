@@ -159,12 +159,20 @@ def run_single_roll(train_df, val_df, stockid2idx, roll_idx, config_override=Non
     train_data, _ = preprocess_data(train_df, is_train=True, stockid2idx=stockid2idx)
     val_data, _ = preprocess_val_data(val_df, stockid2idx=stockid2idx)
 
+    # 检查特征工程后数据是否为空（验证集在数据末尾可能因缺少未来标签而被全部丢弃）
+    if len(train_data) == 0:
+        return {'final_score': 0.0, 'error': 'empty_train_data'}
+    if len(val_data) == 0:
+        return {'final_score': 0.0, 'error': 'empty_val_data'}
+
     # ── 2. 标准化 ──
     scaler = StandardScaler()
     for col_set in [train_data, val_data]:
         col_set[features_list] = col_set[features_list].replace([np.inf, -np.inf], np.nan)
     train_data = train_data.dropna(subset=features_list)
     val_data = val_data.dropna(subset=features_list)
+    if len(train_data) == 0 or len(val_data) == 0:
+        return {'final_score': 0.0, 'error': 'empty_after_dropna'}
     train_data[features_list] = scaler.fit_transform(train_data[features_list])
     val_data[features_list] = scaler.transform(val_data[features_list])
 
