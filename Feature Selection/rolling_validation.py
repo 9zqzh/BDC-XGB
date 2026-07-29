@@ -28,6 +28,8 @@ def _load_group_features(path: Path, all_features: list[str], groups: dict[str, 
                     "volume_liquidity": "no_volume",
                     "range_breakout": "no_range",
                     "momentum_trend": "no_momentum",
+                    "volatility_risk": "no_volatility",
+                    "other": "no_other",
                 }.items()
                 if experiment in set(results["experiment"])
                 and float(results.loc[results["experiment"] == experiment, "final_score"].iloc[0]) < baseline

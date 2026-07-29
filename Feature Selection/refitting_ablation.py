@@ -13,14 +13,28 @@ from rank_ic import calculate_rank_ic
 
 
 EXPERIMENTS = (
-    "baseline", "volume_only", "range_only", "momentum_only",
-    "no_volume", "no_range", "no_momentum", "selected_features",
+    "baseline",
+    "volume_only", "range_only", "momentum_only",
+    "volatility_only", "other_only",
+    "no_volume", "no_range", "no_momentum",
+    "no_volatility", "no_other",
+    "selected_features",
 )
 
 _EXPERIMENT_GROUPS = {
     "volume": "volume_liquidity",
     "range": "range_breakout",
     "momentum": "momentum_trend",
+    "volatility": "volatility_risk",
+    "other": "other",
+}
+
+_RETAINED_GROUP_EXPERIMENTS = {
+    "volume_liquidity": "no_volume",
+    "range_breakout": "no_range",
+    "momentum_trend": "no_momentum",
+    "volatility_risk": "no_volatility",
+    "other": "no_other",
 }
 
 
@@ -104,11 +118,7 @@ def run(output_dir: Path, selected_path: Path | None = None) -> pd.DataFrame:
         summary["group_importance"] = baseline - summary["final_score_mean"]
     summary.to_csv(output_dir / "refitting_summary.csv", index=False, encoding="utf-8-sig")
     retained = [
-        group for group, experiment in {
-            "volume_liquidity": "no_volume",
-            "range_breakout": "no_range",
-            "momentum_trend": "no_momentum",
-        }.items()
+        group for group, experiment in _RETAINED_GROUP_EXPERIMENTS.items()
         if not summary.empty and experiment in set(summary["experiment"])
         and float(summary.loc[summary["experiment"] == experiment, "group_importance"].iloc[0]) > 0
         and float(summary.loc[summary["experiment"] == experiment, "positive_window_ratio"].iloc[0]) >= 0.5

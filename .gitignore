@@ -30,3 +30,4 @@ write_probe.txt
 code/src/lr_search.py
 code/src/optuna_search.py
 
+analys_docs
