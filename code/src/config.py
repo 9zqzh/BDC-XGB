@@ -9,6 +9,8 @@ config = {
     'xgb_flatten_days': 10,               # XGBRanker 展平天数（60→10，信噪比↑6×）
     'output_dir': f'./model/{sequence_length}_{feature_num}',
     'data_path': './data',
+    # 因子IC筛选后的特征列表（None=使用全部特征，运行 factor_ic.py 后手动填入显著因子）
+    'selected_features': None,
 }
 
 # ============ XGBRanker 超参数 ============

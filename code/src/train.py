@@ -431,7 +431,7 @@ def flatten_sequences_to_xgb(data, features, sequence_length, flatten_days=None)
 
     - 历史窗口 = sequence_length (60天，确保上下文)
     - 展平窗口 = flatten_days (默认10天，控制特征维度)
-    - 附加市场状态特征（全局均值、波动率、趋势）
+    - 市场状态特征已从输入中移除，改为在后处理阶段使用
     """
     import tempfile
 
@@ -449,43 +449,7 @@ def flatten_sequences_to_xgb(data, features, sequence_length, flatten_days=None)
     date2qid = {d: i for i, d in enumerate(valid_dates)}
 
     n_feat = len(features)
-    feat_dim = flatten_days * n_feat + 7  # +7 市场状态特征（6维 + 1维 regime 方向）
-
-    # ── 预计算市场状态特征（短窗口+长窗口） ──
-    print("正在计算市场状态特征...")
-    market_daily = data.groupby('日期')['label'].mean().sort_index()
-    market_returns = market_daily.values
-    mkt = pd.Series(market_returns, index=market_daily.index)
-    # 短窗口：5日收益均值、5日波动率、10日波动率
-    mkt_ret_5d = mkt.rolling(5, min_periods=3).mean().values
-    mkt_vol_5d = mkt.rolling(5, min_periods=3).std().values
-    mkt_vol_10d = mkt.rolling(10, min_periods=5).std().values
-    # 长窗口：20日波动率、60日趋势、当日收益
-    mkt_vol_20d = mkt.rolling(20, min_periods=5).std().values
-    mkt_trend_60d = mkt.rolling(60, min_periods=10).sum().values
-    date2market = {}
-    for i, d in enumerate(market_daily.index):
-        trend_60d = float(mkt_trend_60d[i]) if not np.isnan(mkt_trend_60d[i]) else 0.0
-        # regime 方向编码（60日累计收益 → 5档）
-        if trend_60d > 0.05:
-            regime = 2.0   # 强牛市
-        elif trend_60d > 0.02:
-            regime = 1.0   # 牛市
-        elif trend_60d < -0.05:
-            regime = -2.0  # 强熊市
-        elif trend_60d < -0.02:
-            regime = -1.0  # 熊市
-        else:
-            regime = 0.0   # 震荡
-        date2market[d] = (
-            float(market_returns[i]),                                               # 当日全市场收益
-            float(mkt_vol_5d[i]) if not np.isnan(mkt_vol_5d[i]) else 0.0,           # 5日波动率
-            float(mkt_ret_5d[i]) if not np.isnan(mkt_ret_5d[i]) else 0.0,           # 5日均收益
-            float(mkt_vol_10d[i]) if not np.isnan(mkt_vol_10d[i]) else 0.0,         # 10日波动率
-            float(mkt_vol_20d[i]) if not np.isnan(mkt_vol_20d[i]) else 0.0,         # 20日波动率(保留)
-            trend_60d,                                                                # 60日趋势(保留)
-            regime,                                                                   # 市场方向(新增)
-        )
+    feat_dim = flatten_days * n_feat  # 仅展平因子特征（市场状态特征已从输入中移除，改为后处理使用）
 
     # ── 第一遍：统计总样本数 ──
     print("正在统计样本数...")
@@ -518,10 +482,9 @@ def flatten_sequences_to_xgb(data, features, sequence_length, flatten_days=None)
         }
 
     # ── 第二遍：按日期顺序遍历，天然保证 qid 有序 ──
-    print(f"正在展平时序特征（最后{flatten_days}天 × {n_feat}维 + 7市场 = {feat_dim:,}维，memmap 模式）...")
+    print(f"正在展平时序特征（最后{flatten_days}天 × {n_feat}维 = {feat_dim:,}维，memmap 模式）...")
     write_pos = 0
     for q, d in enumerate(tqdm(valid_dates, desc="展平特征")):
-        mkt_feat = date2market.get(d, (0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0))
         for stock, grp in stock_groups.items():
             idx = np.where(grp['dates'] == d)[0]
             if len(idx) == 0:
@@ -536,9 +499,7 @@ def flatten_sequences_to_xgb(data, features, sequence_length, flatten_days=None)
                 pad = np.zeros((flatten_days - len(seq), n_feat), dtype=np.float32)
                 seq = np.vstack([pad, seq])
             flat = seq.flatten()
-            # 追加市场状态特征
-            row = np.concatenate([flat, np.array(mkt_feat, dtype=np.float32)])
-            X[write_pos] = row
+            X[write_pos] = flat
             y[write_pos] = grp['label'][i]
             qid[write_pos] = q
             write_pos += 1
@@ -727,6 +688,13 @@ def train_one_window(train_df, val_df, val_start, stockid2idx, num_stocks, confi
         val_data, _ = _merge_fundamentals(val_data, fundamental_path)
         features_list = features_list + fund_cols
 
+    # ── 因子IC筛选（仅当 selected_features 已配置时生效） ──
+    if config.get('selected_features'):
+        original_count = len(features_list)
+        valid_features = [f for f in config['selected_features'] if f in features_list]
+        features_list = valid_features
+        print(f"特征筛选: {len(features_list)} 个显著因子 (从 {original_count} 缩减)")
+
     # ── 展平特征 ──
     X_train, y_train_cont, qid_train, _, _, valid_train_dates = flatten_sequences_to_xgb(
         train_data, features_list, sequence_length
@@ -783,15 +751,11 @@ def train_one_window(train_df, val_df, val_start, stockid2idx, num_stocks, confi
     importance = model.feature_importances_
     top_idx = np.argsort(importance)[-20:][::-1]
     n_feat_per_day = len(features_list)
-    print(f"\n特征重要性 Top20 (共{len(importance)}维, 每{n_feat_per_day}维=1天特征, 后7维=市场状态):")
+    print(f"\n特征重要性 Top20 (共{len(importance)}维, 每{n_feat_per_day}维=1天特征):")
     for rank, idx in enumerate(top_idx):
-        if idx >= len(importance) - 7:
-            labels_7 = ["市场_当日", "市场_5日波动", "市场_5日均", "市场_10日波动", "市场_20日波动", "市场_60日趋势", "市场_regime"]
-            label = labels_7[idx - (len(importance) - 7)]
-        else:
-            day = idx // n_feat_per_day + 1
-            f_idx = idx % n_feat_per_day
-            label = f"T-{flatten_days - day + 1}天_{features_list[f_idx][:8]}"
+        day = idx // n_feat_per_day + 1
+        f_idx = idx % n_feat_per_day
+        label = f"T-{flatten_days - day + 1}天_{features_list[f_idx][:8]}"
         print(f"  {rank+1:2d}. {label}: {importance[idx]:.6f}")
 
     # ── 评估（使用原始连续收益标签，非整数排位） ──

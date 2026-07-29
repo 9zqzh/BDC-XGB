@@ -13,6 +13,7 @@ from tqdm import tqdm
 
 from config import config
 from utils import engineer_features_39, engineer_features_158plus39
+from postprocess import confidence_aware_postprocess
 
 
 def main():
@@ -89,9 +90,6 @@ def main():
     flatten_days = config.get('xgb_flatten_days', 10)
     n_feat = len(features)
 
-    # 市场状态特征（从 processed 数据实时计算，与训练保持一致）
-    market_daily = processed.groupby('日期')['涨跌幅'].mean().sort_index() if '涨跌幅' in processed.columns else pd.Series(dtype=float)
-
     rows, stock_codes = [], []
     for stock_id in stock_ids:
         stock_history = processed[
@@ -106,11 +104,7 @@ def main():
                 pad = np.zeros((flatten_days - len(feat), n_feat), dtype=np.float32)
                 feat = np.vstack([pad, feat])
             flat = feat.flatten()
-            # 市场状态（与训练时一致的7维：6市场+1 regime，推理时填0）
-            latest_date_stock = pd.to_datetime(stock_history['日期'].values[-1])
-            mkt_ret = float(market_daily.get(latest_date_stock, 0.0)) if len(market_daily) > 0 else 0.0
-            mkt_feat = np.array([mkt_ret, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], dtype=np.float32)
-            rows.append(np.concatenate([flat, mkt_feat]))
+            rows.append(flat)
             stock_codes.append(stock_id)
 
     if len(rows) == 0:
@@ -118,18 +112,20 @@ def main():
 
     X_infer = np.array(rows, dtype=np.float32)
     scores = model.predict(X_infer)
-    order = np.argsort(scores)[::-1]
-    ranked_stock_ids = [stock_codes[i] for i in order]
 
-    if len(ranked_stock_ids) < 5:
-        raise ValueError(f'可预测股票不足5只，当前仅有 {len(ranked_stock_ids)} 只')
-    top5 = ranked_stock_ids[:5]
-    output_df = pd.DataFrame({'stock_id': top5, 'weight': [0.2] * len(top5)})
+    # 置信度驱动的后处理（替代等权 Top5）
+    selected_stocks, weights, conf_info = confidence_aware_postprocess(
+        scores, stock_codes, top_k=5
+    )
+
+    output_df = pd.DataFrame({'stock_id': selected_stocks, 'weight': weights})
     output_df.to_csv(output_path, index=False)
 
     print(f'预测日期: {latest_date.date()}')
-    print(f'参与排序股票数(沪深300): {len(ranked_stock_ids)}')
-    print(f'Top5 股票: {top5}')
+    print(f'参与排序股票数(沪深300): {len(stock_codes)}')
+    print(f'置信度: gap={conf_info["confidence_gap"]:.3f}, '
+          f'选取{conf_info["n_selected"]}只, z阈值={conf_info["z_threshold_used"]:.1f}')
+    print(f'选中股票: {list(zip(selected_stocks, [f"{w:.4f}" for w in weights]))}')
     print(f'结果已写入: {output_path}')
 
 

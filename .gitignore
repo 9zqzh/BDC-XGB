@@ -26,6 +26,15 @@ temp/
 write_probe.txt
 ~$*
 
+# QoderWork skill reference dirs
+backtesting-frameworks/
+machine-learning/
+mle-workflow/
+model-hyperparameter-tuning/
+optimize/
+scikit-learn-best-practices/
+time-series-analysis/
+
 # Legacy scripts (PyTorch era)
 code/src/lr_search.py
 code/src/optuna_search.py
