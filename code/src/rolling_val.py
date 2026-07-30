@@ -415,21 +415,19 @@ def tune_postprocess_params():
     警告：计算量极大，建议在 GPU/多核机器上运行。
     """
     from itertools import product
+    global N_ROLLS
 
-    gap_thresholds = [0.5, 1.0, 1.5, 2.0]
-    temperatures = [0.5, 0.7, 1.0, 1.5]
-    z_thresholds = [0.5, 1.0, 1.5]
+    gap_thresholds = [0.15, 0.25, 0.40]   # 高/中/低分界
+    temperatures = [0.5, 0.7]              # softmax 温度
+    z_thresholds = [0.0, 0.3, 0.5]          # z-score 门槛（0.0=不做门槛过滤）
 
     param_combos = list(product(gap_thresholds, temperatures, z_thresholds))
-    print(f"后处理参数搜索: {len(param_combos)} 组合")
-    print(f"  每个组合跑50次滚动验证")
+    print(f"Stage 1 粗筛: {len(param_combos)} 组合 x {N_ROLLS} 次滚动")
+    print(f"  搜索区间: gap=[{gap_thresholds[0]},{gap_thresholds[-1]}], temp={temperatures}, z=[{z_thresholds[0]},{z_thresholds[-1]}]")
 
-    best_score = -999
-    best_params = None
-    best_summary = None
-
+    stage1_results = []
     for idx, (gap, temp, z_thresh) in enumerate(param_combos):
-        print(f"\n[{idx+1}/{len(param_combos)}] gap={gap}, temp={temp}, z_thresh={z_thresh}")
+        print(f"\n[S1 {idx+1}/{len(param_combos)}] gap={gap}, temp={temp}, z={z_thresh}")
 
         postproc_params = {
             'gap_thresholds': [gap, gap * 0.5, gap * 0.25],
@@ -438,8 +436,50 @@ def tune_postprocess_params():
             'n_selects': [5, 4, 2, 1],
         }
 
-        config_override = postproc_params
-        summary, _ = run_rolling_validation(config_override=config_override)
+        summary, _ = run_rolling_validation(config_override=postproc_params)
+
+        if summary is None:
+            continue
+
+        composite = (
+            summary['positive_ratio'] * 2.0
+            + summary['mean_final_score'] * 10.0
+            - summary['max_consecutive_loss'] * 0.1
+        )
+        print(f"  -> composite={composite:.3f} (pos={summary['positive_ratio']:.2%}, "
+              f"fs={summary['mean_final_score']:.4f}, "
+              f"selected={summary.get('mean_selected',0):.1f}, "
+              f"consec={summary['max_consecutive_loss']})")
+        stage1_results.append((composite, gap, temp, z_thresh, summary))
+
+    stage1_results.sort(key=lambda x: x[0], reverse=True)
+    top3 = stage1_results[:3]
+
+    print(f"\n{'='*60}")
+    print(f"  Stage 1 Top3:")
+    for i, (comp, g, t, z, s) in enumerate(top3):
+        print(f"  #{i+1}: gap={g}, temp={t}, z={z}  composite={comp:.3f}  pos={s['positive_ratio']:.2%}  fs={s['mean_final_score']:.4f}")
+
+    # Stage 2: Top3 精调
+    print(f"\nStage 2 精调: Top3 组合 x 50 次滚动")
+    saved_rolls = N_ROLLS
+    N_ROLLS = 50
+
+    best_score = -999
+    best_params = None
+    best_summary = None
+
+    for i, (_, gap, temp, z_thresh, _) in enumerate(top3):
+        print(f"\n[S2 {i+1}/3] gap={gap}, temp={temp}, z={z_thresh} (50 rolls)")
+
+        postproc_params = {
+            'gap_thresholds': [gap, gap * 0.5, gap * 0.25],
+            'temperatures': [temp, temp * 0.7, temp * 0.3, temp * 0.1],
+            'z_thresholds': [z_thresh, z_thresh * 2.0, z_thresh * 3.0, z_thresh * 4.0],
+            'n_selects': [5, 4, 2, 1],
+        }
+
+        summary, _ = run_rolling_validation(config_override=postproc_params)
 
         if summary is None:
             continue
@@ -450,15 +490,12 @@ def tune_postprocess_params():
             - summary['max_consecutive_loss'] * 0.1
         )
 
-        print(f"  → composite={composite:.3f} (pos={summary['positive_ratio']:.2%}, "
-              f"fs={summary['mean_final_score']:.4f}, "
-              f"consec_loss={summary['max_consecutive_loss']})")
-
         if composite > best_score:
             best_score = composite
             best_params = {'gap': gap, 'temperature': temp, 'z_threshold': z_thresh}
             best_summary = summary
 
+    N_ROLLS = saved_rolls
     print(f"\n{'='*60}")
     print(f"  最佳后处理参数")
     print(f"{'='*60}")
@@ -471,6 +508,85 @@ def tune_postprocess_params():
     print(f"{'='*60}")
 
     return best_params, best_summary
+
+
+def compare_v3_vs_ic():
+    """
+    v3 精选因子 vs 原始IC筛选因子 对比。
+    A组 = v3 (当前 selected_features，73个)
+    B组 = IC124 (上一轮 IC 筛选结果，124个)
+    """
+    IC124_FEATURES = [
+        '开盘', '收盘', '最高', '最低', '成交额', '振幅', '涨跌额', '换手率',
+        'KMID', 'KLEN', 'KUP', 'KLOW', 'OPEN0', 'HIGH0', 'LOW0', 'VWAP0',
+        'ROC5', 'ROC10', 'ROC20', 'ROC30', 'ROC60',
+        'MA5', 'MA10', 'MA20', 'MA30', 'MA60',
+        'STD5', 'STD10', 'STD20', 'STD30', 'STD60',
+        'BETA5', 'BETA10', 'BETA20', 'BETA30', 'BETA60',
+        'RESI10', 'RESI60', 'MAX5', 'MAX10', 'MAX20',
+        'MIN5', 'MIN10', 'MIN20', 'MIN30', 'MIN60',
+        'QTLU20', 'QTLU30', 'QTLU60',
+        'QTLD5', 'QTLD10', 'QTLD20', 'QTLD30', 'QTLD60',
+        'RANK5', 'RANK30',
+        'IMAX20', 'IMAX30', 'IMAX60',
+        'IMIN5', 'IMIN20', 'IMIN30', 'IMIN60',
+        'IMXD5', 'IMXD20', 'IMXD30', 'IMXD60',
+        'CORR5', 'CORR10', 'CORR20', 'CORR30',
+        'CORD5', 'CORD10', 'CORD20', 'CORD30', 'CORD60',
+        'CNTP5', 'CNTP20', 'CNTP30', 'CNTD20', 'CNTD30',
+        'SUMP20', 'SUMP30',
+        'SUMN20', 'SUMN30', 'SUMN60',
+        'SUMD20', 'SUMD30', 'SUMD60',
+        'VMA60',
+        'VSTD5', 'VSTD10', 'VSTD20', 'VSTD30',
+        'VSUMP30', 'VSUMP60', 'VSUMN30', 'VSUMN60', 'VSUMD30', 'VSUMD60',
+        'sma_5', 'sma_20', 'ema_12', 'ema_26', 'rsi', 'macd', 'macd_signal',
+        'obv', 'boll_mid', 'boll_std', 'atr_14', 'ema_60',
+        'volatility_10', 'volatility_20', 'return_5', 'return_10',
+        'high_low_spread', 'open_close_spread', 'high_close_spread', 'low_close_spread',
+        'PE_TTM', 'PB', 'ROE_approx', '总市值_对数',
+        '行业_交通运输', '行业_公用事业', '行业_化工', '行业_医药生物',
+        '行业_国防军工', '行业_地产建筑', '行业_家用电器', '行业_消费零售',
+        '行业_能源', '行业_通信', '行业_金融', '行业_食品饮料',
+    ]
+
+    print("=" * 60)
+    print("  v3精选 vs IC124 因子对比")
+    print("=" * 60)
+
+    v3_features = config.get('selected_features', [])
+    print(f"\n[A组] v3 精选因子（{len(v3_features)} 个）...")
+    summary_a, _ = run_rolling_validation()
+
+    config['selected_features'] = IC124_FEATURES
+    print(f"\n[B组] IC124 因子（{len(IC124_FEATURES)} 个）...")
+    summary_b, _ = run_rolling_validation()
+
+    config['selected_features'] = v3_features
+
+    if summary_a and summary_b:
+        print(f"\n{'='*60}")
+        print(f"  v3 vs IC124 对比结果")
+        print(f"{'='*60}")
+        print(f"  {'指标':<22s} {'A(v3精选)':>12s} {'B(IC124)':>12s} {'变化':>10s}")
+        print(f"  {'-'*56}")
+
+        for key, fmt in [
+            ('positive_ratio', '.2%'), ('mean_final_score', '.4f'),
+            ('std_final_score', '.4f'), ('max_consecutive_loss', 'd'),
+            ('mean_win_rate', '.4f'), ('mean_spearman', '.4f'),
+        ]:
+            va = summary_a.get(key, 0)
+            vb = summary_b.get(key, 0)
+            if isinstance(va, (int, float)) and isinstance(vb, (int, float)):
+                change = vb - va
+                if fmt == '.2%':
+                    print(f"  {key:<22s} {va:>12.2%} {vb:>12.2%} {change:>+10.2%}")
+                elif fmt == 'd':
+                    print(f"  {key:<22s} {int(va):>12d} {int(vb):>12d} {int(change):>+10d}")
+                else:
+                    print(f"  {key:<22s} {va:>12.4f} {vb:>12.4f} {change:>+10.4f}")
+        print(f"{'='*60}")
 
 
 def compare_features():
@@ -524,7 +640,8 @@ if __name__ == '__main__':
 
     parser = argparse.ArgumentParser(description='50次滚动窗口验证 (XGBRanker)')
     parser.add_argument('--tune', action='store_true', help='后处理参数网格搜索')
-    parser.add_argument('--compare_feats', action='store_true', help='特征筛选A/B对比')
+    parser.add_argument('--compare_feats', action='store_true', help='all vs current')
+    parser.add_argument('--v3_vs_ic', action='store_true', help='v3 vs IC124')
     parser.add_argument('--n_rolls', type=int, default=N_ROLLS, help=f'滚动次数 (默认{N_ROLLS})')
     args = parser.parse_args()
 
@@ -534,6 +651,8 @@ if __name__ == '__main__':
 
     if args.tune:
         tune_postprocess_params()
+    elif args.v3_vs_ic:
+        compare_v3_vs_ic()
     elif args.compare_feats:
         compare_features()
     else:
