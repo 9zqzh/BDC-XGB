@@ -381,8 +381,14 @@ def update_quote_cache(
     no_akshare_fallback: bool,
     max_retries: int,
     sleep_seconds: float,
+    allow_partial_end: bool = False,
 ) -> tuple[pd.DataFrame, bool]:
-    """Load a complete cache or fetch and merge only its missing tail."""
+    """Load a cache or fetch its missing tail.
+
+    Historical constituents can have no bars on the final membership date
+    (for example, because of a suspension).  In that case callers may accept
+    the last available bar while current constituents remain strict.
+    """
     cached: pd.DataFrame | None = None
     if cache_path.exists() and not force_refresh:
         try:
@@ -431,9 +437,16 @@ def update_quote_cache(
     quote = fresh if cached is None else pd.concat([cached, fresh], ignore_index=True)
     quote = quote.drop_duplicates(["股票代码", "日期"], keep="last")
     quote = _slice_quote_range(quote, start_date, required_end)
-    if quote_cache_needs_update(quote, required_end):
+    if quote_cache_needs_update(quote, required_end) and not allow_partial_end:
         raise RuntimeError(
             f"Quote cache for {code} ends at {quote['日期'].max()}, expected {required_end}"
+        )
+    if quote_cache_needs_update(quote, required_end):
+        LOG.warning(
+            "Quote cache for %s ends at %s; historical membership ended at %s",
+            code,
+            quote["日期"].max(),
+            required_end,
         )
     _atomic_csv(quote, cache_path)
     return quote, fallback_used
@@ -513,6 +526,7 @@ def main() -> None:
         all_data: list[pd.DataFrame] = []
         failures: list[dict[str, str]] = []
         fallback_count = 0
+        partial_stocks: list[dict[str, str]] = []
         for index, code in enumerate(sorted(membership["股票代码"].unique()), start=1):
             cache_path = quote_dir / f"{code}.csv"
             membership_end = membership.loc[
@@ -531,9 +545,19 @@ def main() -> None:
                     no_akshare_fallback=args.no_akshare_fallback,
                     max_retries=args.max_retries,
                     sleep_seconds=args.sleep_seconds,
+                    allow_partial_end=pd.Timestamp(required_end) < pd.Timestamp(end_date),
                 )
                 fallback_count += int(fallback_used)
                 all_data.append(quote)
+                quote_max = pd.to_datetime(quote["日期"]).max()
+                if quote_max < pd.Timestamp(required_end):
+                    partial_stocks.append(
+                        {
+                            "股票代码": code,
+                            "缓存最后日期": quote_max.strftime("%Y-%m-%d"),
+                            "成分股失效日期": required_end,
+                        }
+                    )
                 LOG.info("[%d] %s complete (%d rows)", index, code, len(quote))
             except Exception as exc:
                 failures.append({"股票代码": code, "错误": str(exc)})
@@ -541,6 +565,14 @@ def main() -> None:
 
         failed_path = output_path.parent / "failed_stocks.csv"
         _atomic_csv(pd.DataFrame(failures, columns=["股票代码", "错误"]), failed_path)
+        partial_path = output_path.parent / "partial_stocks.csv"
+        _atomic_csv(
+            pd.DataFrame(
+                partial_stocks,
+                columns=["股票代码", "缓存最后日期", "成分股失效日期"],
+            ),
+            partial_path,
+        )
         if failures:
             raise RuntimeError(f"Failed to collect {len(failures)} stocks; see {failed_path}")
         combined = filter_by_membership(pd.concat(all_data, ignore_index=True), membership) if all_data else pd.DataFrame(columns=OUTPUT_COLUMNS)

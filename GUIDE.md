@@ -40,6 +40,8 @@ uv run python get_stock_data.py --start-date 2018-01-01
 
 仅在缓存损坏或需要完整重建时使用 `--force-refresh`。
 
+已退出沪深300的股票如果最后成分股日期没有行情，脚本会保留其最后可用历史数据并继续生成总文件；此类股票记录在 `data/partial_stocks.csv`。当前成分股的网络或接口失败仍会写入 `data/failed_stocks.csv` 并中止。
+
 （如果出现网络问题，请关闭代理重试，多尝试几次）
 
 成功下载数据

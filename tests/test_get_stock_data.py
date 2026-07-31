@@ -156,6 +156,28 @@ def test_update_quote_cache_skips_network_when_current(tmp_path: Path) -> None:
     assert fallback_used is False
 
 
+def test_update_quote_cache_allows_partial_historical_tail(tmp_path: Path) -> None:
+    cache_path = tmp_path / "000001.csv"
+    pd.DataFrame([_quote_row(日期="2025-03-04")]).to_csv(cache_path, index=False)
+    fresh = pd.DataFrame([_quote_row(日期="2025-03-05")])
+
+    with patch("get_stock_data.fetch_baostock_history", return_value=fresh):
+        result, fallback_used = update_quote_cache(
+            code="000001",
+            cache_path=cache_path,
+            start_date="2018-01-01",
+            required_end="2025-03-07",
+            force_refresh=False,
+            no_akshare_fallback=True,
+            max_retries=1,
+            sleep_seconds=0,
+            allow_partial_end=True,
+        )
+
+    assert result["日期"].tolist() == ["2025-03-04", "2025-03-05"]
+    assert fallback_used is False
+
+
 def test_build_membership_probes_latest_trading_day(tmp_path: Path) -> None:
     constituents = {f"{code:06d}": f"stock-{code}" for code in range(300)}
 

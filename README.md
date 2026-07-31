@@ -104,6 +104,8 @@ XGBRanker 超参数网格搜索脚本。
 
 ## 3. 数据与输入输出约定
 
+行情抓取入口是 `get_stock_data.py`，使用 BaoStock 自动探测最新交易日并按单股缓存增量更新。已退出沪深300的股票若在失效日期附近没有最后一根日线，会保留最后可用数据并记录到 `data/partial_stocks.csv`；当前成分股的网络/API失败仍记录到 `data/failed_stocks.csv` 并中止。
+
 默认训练数据文件：
 - `data/train.csv`
 
