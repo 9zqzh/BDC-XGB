@@ -9,19 +9,15 @@ config = {
     'xgb_flatten_days': 10,               # XGBRanker 展平天数（60→10，信噪比↑6×）
     'output_dir': f'./model/{sequence_length}_{feature_num}',
     'data_path': './data',
-    # 因子筛选：IC124（|t-stat|>2）+ 全21行业（V3对比后最优方案）
+    # 因子：IC124最优基准 + 全21行业 + P2交叉（9/10 IC通过）
     'selected_features': [
-        # ── 原始价量（8） ──
         '开盘', '收盘', '最高', '最低', '成交额', '振幅', '涨跌额', '换手率',
-        # ── K线结构 + 价格比（16） ──
         'KMID', 'KLEN', 'KUP', 'KLOW', 'OPEN0', 'HIGH0', 'LOW0', 'VWAP0',
         'ROC5', 'ROC10', 'ROC20', 'ROC30', 'ROC60',
         'MA5', 'MA10', 'MA20', 'MA30', 'MA60',
-        # ── 波动/回归（14） ──
         'STD5', 'STD10', 'STD20', 'STD30', 'STD60',
         'BETA5', 'BETA10', 'BETA20', 'BETA30', 'BETA60',
         'RESI10', 'RESI60', 'MAX5', 'MAX10', 'MAX20',
-        # ── 区间位置（25） ──
         'MIN5', 'MIN10', 'MIN20', 'MIN30', 'MIN60',
         'QTLU20', 'QTLU30', 'QTLU60',
         'QTLD5', 'QTLD10', 'QTLD20', 'QTLD30', 'QTLD60',
@@ -29,25 +25,20 @@ config = {
         'IMAX20', 'IMAX30', 'IMAX60',
         'IMIN5', 'IMIN20', 'IMIN30', 'IMIN60',
         'IMXD5', 'IMXD20', 'IMXD30', 'IMXD60',
-        # ── 相关性（9） ──
         'CORR5', 'CORR10', 'CORR20', 'CORR30',
         'CORD5', 'CORD10', 'CORD20', 'CORD30', 'CORD60',
-        # ── 涨跌计数/累计（13） ──
         'CNTP5', 'CNTP20', 'CNTP30', 'CNTD20', 'CNTD30',
         'SUMP20', 'SUMP30',
         'SUMN20', 'SUMN30', 'SUMN60',
         'SUMD20', 'SUMD30', 'SUMD60',
-        # ── 量能（11） ──
         'VMA60',
         'VSTD5', 'VSTD10', 'VSTD20', 'VSTD30',
         'VSUMP30', 'VSUMP60', 'VSUMN30', 'VSUMN60', 'VSUMD30', 'VSUMD60',
-        # ── 技术指标（16） ──
         'sma_5', 'sma_20', 'ema_12', 'ema_26', 'rsi', 'macd', 'macd_signal',
         'obv', 'boll_mid', 'boll_std', 'atr_14', 'ema_60',
         'volatility_10', 'volatility_20', 'return_5', 'return_10',
-        # ── 价差（4） ──
         'high_low_spread', 'open_close_spread', 'high_close_spread', 'low_close_spread',
-        # ── 基本面 + 全21行业（25） ──
+        # 基本面 + 全21行业
         'PE_TTM', 'PB', 'ROE_approx', '总市值_对数',
         '行业_交通运输', '行业_传媒', '行业_公用事业', '行业_农林牧渔',
         '行业_化工', '行业_医药生物', '行业_国防军工', '行业_地产建筑',

@@ -54,7 +54,13 @@ feature_columns_map = {
         'sma_5', 'sma_20', 'ema_12', 'ema_26', 'rsi', 'macd', 'macd_signal', 'volume_change', 'obv',
         'volume_ma_5', 'volume_ma_20', 'volume_ratio', 'kdj_k', 'kdj_d', 'kdj_j', 'boll_mid', 'boll_std',
         'atr_14', 'ema_60', 'volatility_10', 'volatility_20', 'return_1', 'return_5', 'return_10',
-        'high_low_spread', 'open_close_spread', 'high_close_spread', 'low_close_spread'
+        'high_low_spread', 'open_close_spread', 'high_close_spread', 'low_close_spread',
+        # P2 动量交叉特征
+        'cross_MA60_SUMN60', 'cross_MA60_ROC60', 'cross_MA60_ROC30',
+        'cross_SUMN60_ROC60', 'cross_SUMN30_ROC60',
+        'cross_MA60_MA30', 'cross_ROC30_MA30',
+        # 指南P2交叉特征
+        'cross_vol_price_div', 'cross_sharpe', 'cross_liq_adj_ret',
     ],
 }
 

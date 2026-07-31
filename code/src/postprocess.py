@@ -67,10 +67,11 @@ def confidence_aware_postprocess(scores, stock_codes, top_k=5, params=None):
     # ── Step 4: 根据置信度决定选取策略 ──
     if params is None:
         params = {}
-    gap_thresholds = params.get('gap_thresholds', [2.0, 1.0, 0.5])
+    # 默认参数已通过 rolling_val.py --tune 两阶段调优（gap=0.15, temp=0.5, z=0.5）
+    gap_thresholds = params.get('gap_thresholds', [0.15, 0.075, 0.0375])
     n_selects = params.get('n_selects', [5, 4, 2, 1])
     z_thresholds = params.get('z_thresholds', [0.5, 1.0, 1.5, 2.0])
-    temperatures = params.get('temperatures', [1.0, 0.7, 0.3, 0.1])
+    temperatures = params.get('temperatures', [0.5, 0.35, 0.15, 0.05])
 
     if confidence_gap > gap_thresholds[0]:
         # 高置信度：模型有明确判断

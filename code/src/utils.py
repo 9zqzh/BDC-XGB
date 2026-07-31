@@ -41,6 +41,39 @@ def engineer_features_158plus39(df):
     # 4. 处理可能因为合并产生的重复列（如果两个函数生成了同名特征）
     df_final = df_final.loc[:,~df_final.columns.duplicated()]
 
+    # 4.5 动量交叉特征（P2: v3验证的 MA/ROC/SUMN 交互项）
+    cross_deps = {
+        'cross_MA60_SUMN60': ('MA60', 'SUMN60'),
+        'cross_MA60_ROC60':  ('MA60', 'ROC60'),
+        'cross_MA60_ROC30':  ('MA60', 'ROC30'),
+        'cross_SUMN60_ROC60':('SUMN60', 'ROC60'),
+        'cross_SUMN30_ROC60':('SUMN30', 'ROC60'),
+        'cross_MA60_MA30':   ('MA60', 'MA30'),
+        'cross_ROC30_MA30':  ('ROC30', 'MA30'),
+    }
+    for col_name, (a, b) in cross_deps.items():
+        if a in df_final.columns and b in df_final.columns:
+            df_final[col_name] = df_final[a] * df_final[b]
+
+    # 4.6 指南P2交叉特征（量价背离/夏普比率/流动性调整收益）
+    if '收盘' in df_final.columns:
+        close = df_final['收盘']
+        # 量价背离度：价格方向 vs 成交量方向
+        if '成交量' in df_final.columns:
+            df_final['cross_vol_price_div'] = (
+                close.pct_change(5).apply(np.sign) *
+                df_final['成交量'].pct_change(5).apply(np.sign)
+            )
+        # 夏普比率因子：10日动量 / 20日波动率
+        mom_10d = close.pct_change(10)
+        vol_20d = close.pct_change().rolling(20).std()
+        df_final['cross_sharpe'] = mom_10d / (vol_20d + 1e-12)
+        # 流动性调整收益：5日收益 / (1+|换手率变化率|)
+        if '换手率' in df_final.columns:
+            ret_5d = close.pct_change(5)
+            to_change = df_final['换手率'].pct_change(5).fillna(0)
+            df_final['cross_liq_adj_ret'] = ret_5d / (1.0 + to_change.abs())
+
     # 5. 统一处理inf和NaN
     df_final.replace([np.inf, -np.inf], np.nan, inplace=True)
     df_final.fillna(0, inplace=True)

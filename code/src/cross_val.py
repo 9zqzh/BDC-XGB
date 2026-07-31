@@ -24,6 +24,7 @@ def parse_args():
     parser.add_argument('--config_name', type=str, default=None)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--output_dir', type=str, default=None)
+    parser.add_argument('--cross_vs_nocross', action='store_true', help='cross vs no-cross 4-window')
     return parser.parse_args()
 
 
@@ -217,6 +218,57 @@ def generate_summary_report(all_results, output_path):
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(report)
     return report
+def compare_cross_vs_nocross():
+    """
+    P2交叉特征四窗口 A/B 对比：含交叉 vs 不含交叉
+    """
+    CROSS_FEATURES = [
+        'cross_MA60_SUMN60', 'cross_MA60_ROC60', 'cross_MA60_ROC30',
+        'cross_SUMN60_ROC60', 'cross_SUMN30_ROC60',
+        'cross_MA60_MA30', 'cross_ROC30_MA30',
+        'cross_vol_price_div', 'cross_liq_adj_ret',
+    ]
+    windows = config_extended.get('cross_val_windows', [])
+    if not windows:
+        print("错误: config_extended 中没有定义 cross_val_windows")
+        return
+
+    print("=" * 60)
+    print("  四窗口交叉验证 A/B 对比")
+    print("=" * 60)
+
+    # A组: 含交叉
+    base_features = [f for f in config.get('selected_features', []) if f not in CROSS_FEATURES]
+    config['selected_features'] = base_features + CROSS_FEATURES
+    print(f"\n[A组] 含交叉特征（{len(config['selected_features'])} 因子）...")
+    results_a = run_cross_validation(windows, config, config['output_dir'] + '/cross_val_A')
+
+    # B组: 无交叉
+    config['selected_features'] = base_features
+    print(f"\n[B组] 纯IC124基线（{len(base_features)} 因子）...")
+    results_b = run_cross_validation(windows, config, config['output_dir'] + '/cross_val_B')
+
+    # 对比
+    valid_a = [r for r in results_a if 'error' not in r]
+    valid_b = [r for r in results_b if 'error' not in r]
+    if not valid_a or not valid_b:
+        print("窗口数据不足，无法对比")
+        return
+
+    print(f"\n{'='*80}")
+    print(f"  四窗口交叉 A(含交叉) vs B(无交叉) 对比")
+    print(f"{'='*80}")
+    print(f"  {'窗口':<14s} {'A fs':>10s} {'B fs':>10s} {'差值':>10s} {'A wr':>8s} {'B wr':>8s}")
+    print(f"  {'-'*60}")
+    for ra, rb in zip(valid_a, valid_b):
+        label = ra['label'].split('_')[-1] if '_' in ra['label'] else ra['label']
+        afs = ra.get('final_score', 0)
+        bfs = rb.get('final_score', 0)
+        awr = ra.get('win_rate', 0)
+        bwr = rb.get('win_rate', 0)
+        print(f"  {label:<14s} {afs:>10.4f} {bfs:>10.4f} {(bfs-afs):>+10.4f} {awr:>8.4f} {bwr:>8.4f}")
+    print(f"{'='*80}")
+
 
 
 def main():
@@ -231,6 +283,10 @@ def main():
     config_name = args.config_name or f"{config['sequence_length']}_{config['feature_num']}"
     base_output_dir = args.output_dir or f"./model/{config_name}"
     os.makedirs(base_output_dir, exist_ok=True)
+
+    if args.cross_vs_nocross:
+        compare_cross_vs_nocross()
+        return
 
     print(f"将执行 {len(windows)} 个窗口的交叉验证 (XGBRanker)")
     print(f"输出目录: {base_output_dir}")

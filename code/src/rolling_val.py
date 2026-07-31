@@ -587,6 +587,51 @@ def compare_v3_vs_ic():
                 else:
                     print(f"  {key:<22s} {va:>12.4f} {vb:>12.4f} {change:>+10.4f}")
         print(f"{'='*60}")
+def compare_cross_vs_nocross():
+    """
+    P2交叉特征 A/B 对比：含交叉 vs 不含交叉
+    A组 = IC124 + 9交叉特征(154因子)
+    B组 = 纯IC124基线(145因子)
+    """
+    CROSS_FEATURES = [
+        'cross_MA60_SUMN60', 'cross_MA60_ROC60', 'cross_MA60_ROC30',
+        'cross_SUMN60_ROC60', 'cross_SUMN30_ROC60',
+        'cross_MA60_MA30', 'cross_ROC30_MA30',
+        'cross_vol_price_div', 'cross_liq_adj_ret',
+    ]
+    print("=" * 60)
+    print("  交叉特征 A/B 对比")
+    print("=" * 60)
+
+    base_features = [f for f in config.get('selected_features', []) if f not in CROSS_FEATURES]
+    config['selected_features'] = base_features + CROSS_FEATURES
+    print(f"\n[A组] 含交叉特征（{len(config['selected_features'])} 个因子）...")
+    summary_a, _ = run_rolling_validation()
+
+    config['selected_features'] = base_features
+    print(f"\n[B组] 纯IC124基线（{len(base_features)} 个因子）...")
+    summary_b, _ = run_rolling_validation()
+
+    if summary_a and summary_b:
+        print(f"\n{'='*60}")
+        print(f"  A(含交叉) vs B(无交叉) 对比结果")
+        print(f"{'='*60}")
+        print(f"  {'指标':<22s} {'A(交叉)':>12s} {'B(基线)':>12s} {'变化':>10s}")
+        print(f"  {'-'*56}")
+        for key, fmt in [
+            ('positive_ratio', '.2%'), ('mean_final_score', '.4f'),
+            ('std_final_score', '.4f'), ('max_consecutive_loss', 'd'),
+            ('mean_win_rate', '.4f'), ('mean_spearman', '.4f'),
+        ]:
+            va = summary_a.get(key, 0)
+            vb = summary_b.get(key, 0)
+            if isinstance(va, (int, float)) and isinstance(vb, (int, float)):
+                change = vb - va
+                if fmt == '.2%': print(f"  {key:<22s} {va:>12.2%} {vb:>12.2%} {change:>+10.2%}")
+                elif fmt == 'd': print(f"  {key:<22s} {int(va):>12d} {int(vb):>12d} {int(change):>+10d}")
+                else: print(f"  {key:<22s} {va:>12.4f} {vb:>12.4f} {change:>+10.4f}")
+        print(f"{'='*60}")
+
 
 
 def compare_features():
@@ -642,6 +687,7 @@ if __name__ == '__main__':
     parser.add_argument('--tune', action='store_true', help='后处理参数网格搜索')
     parser.add_argument('--compare_feats', action='store_true', help='all vs current')
     parser.add_argument('--v3_vs_ic', action='store_true', help='v3 vs IC124')
+    parser.add_argument('--cross_vs_nocross', action='store_true', help='cross vs no-cross')
     parser.add_argument('--n_rolls', type=int, default=N_ROLLS, help=f'滚动次数 (默认{N_ROLLS})')
     args = parser.parse_args()
 
@@ -651,6 +697,8 @@ if __name__ == '__main__':
 
     if args.tune:
         tune_postprocess_params()
+    elif args.cross_vs_nocross:
+        compare_cross_vs_nocross()
     elif args.v3_vs_ic:
         compare_v3_vs_ic()
     elif args.compare_feats:

@@ -85,6 +85,12 @@ def main():
     if fund_cols:
         features = features + fund_cols
 
+    # 特征筛选（与训练时一致）
+    if config.get('selected_features'):
+        valid_features = [f for f in config['selected_features'] if f in features]
+        print(f"特征筛选: {len(valid_features)}/{len(features)} 个因子")
+        features = valid_features
+
     # 展平特征
     sequence_length = config['sequence_length']
     flatten_days = config.get('xgb_flatten_days', 10)
