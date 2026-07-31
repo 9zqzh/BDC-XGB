@@ -24,12 +24,21 @@ windows
 
 # 准备数据
 ## 下载所有数据
-在get_stock_data.py中223,224行修改：
+通过命令行参数设置数据范围，无需修改代码或删除现有数据：
+
+```powershell
+uv run python get_stock_data.py --start-date 2018-01-01 --end-date 2026-12-31
 ```
-start_date = "***"
-end_date = "***"
+
+脚本会自动探测 BaoStock 当前最新入库交易日，并从每只股票缓存的最大日期之后增量抓取，结果默认保存为 `data/stock_data.csv`。
+
+持续更新时可以省略 `--end-date`：
+
+```powershell
+uv run python get_stock_data.py --start-date 2018-01-01
 ```
-建议先将现有数据删除后，再运行`python get_stock_data.py`，即可下载所需时间段的数据，默认保存为data/stock_data.csv
+
+仅在缓存损坏或需要完整重建时使用 `--force-refresh`。
 
 （如果出现网络问题，请关闭代理重试，多尝试几次）
 
