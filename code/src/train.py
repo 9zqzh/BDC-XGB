@@ -87,6 +87,8 @@ def _build_label_and_clean(processed, drop_small_open=True):
     if drop_small_open:
         processed = processed[processed['open_t1'] > 1e-4]
 
+    processed = processed.copy()  # P2-5: 显式拷贝，消除SettingWithCopyWarning
+
     processed['label'] = (processed['open_t5'] - processed['open_t1']) / (processed['open_t1'] + 1e-12)
 
     # 转换为超额收益：减去当日等权指数收益

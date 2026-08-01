@@ -9,7 +9,7 @@ config = {
     'xgb_flatten_days': 10,               # XGBRanker 展平天数（60→10，信噪比↑6×）
     'output_dir': f'./model/{sequence_length}_{feature_num}',
     'data_path': './data',
-    # 因子：IC124最优基准 + 全21行业 + P2交叉（9/10 IC通过）
+    # 因子：IC124全量 + P2交叉特征（9/10 IC通过）
     'selected_features': [
         '开盘', '收盘', '最高', '最低', '成交额', '振幅', '涨跌额', '换手率',
         'KMID', 'KLEN', 'KUP', 'KLOW', 'OPEN0', 'HIGH0', 'LOW0', 'VWAP0',
@@ -50,15 +50,14 @@ config = {
 
 # ============ XGBRanker 超参数 ============
 xgb_config = {
-    'max_depth': 5,              # 树最大深度（保持不变）
+    'max_depth': 5,              # 树最大深度
     'learning_rate': 0.03,       # 学习率
-    'n_estimators': 300,         # 最大树数量（↓500→300，减少无效训练）
-    'subsample': 0.6,            # 行采样比例（保持不变）
-    'colsample_bytree': 0.3,     # 列采样比例（↑0.2→0.3，给模型足够特征空间）
-    'reg_alpha': 1.0,            # L1 正则化（↓2.0→1.0，避免过度稀疏化）
-    'reg_lambda': 5.0,           # L2 正则化（↓10.0→5.0，保留有效信号）
+    'n_estimators': 300,         # 最大树数量
+    'subsample': 0.6,            # 行采样比例
+    'colsample_bytree': 0.3,     # 列采样比例
+    'reg_alpha': 1.0,            # L1 正则化
+    'reg_lambda': 5.0,           # L2 正则化
     'min_child_weight': 10,      # 最小叶子权重
-    # 'objective': 'rank:ndcg',    # 直接优化NDCG
     'objective': 'rank:pairwise', # 噪声环境优先：只要求两两相对方向正确
     'eval_metric': 'ndcg@5',     # 评估指标
     'ndcg_exp_gain': False,      # 禁用指数增益（标签>31时必需）

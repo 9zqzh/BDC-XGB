@@ -54,7 +54,7 @@ def main():
         PARAM_GRID['subsample'],
     ))
     print(f"\ncolsample + subsample 网格搜索：{len(grid)} 组合")
-    print(f"锁定参数: max_depth=8, lr=0.03, min_child_weight=10")
+    print(f"锁定参数: max_depth(来自config), lr=0.03, min_child_weight=10")
     print(f"快速模式：n_estimators={QUICK_ESTIMATORS}, early_stopping={QUICK_EARLY_STOP}")
     print("=" * 60)
 
@@ -72,7 +72,7 @@ def main():
         orig_es = xgb_config['early_stopping_rounds']
         xgb_config['colsample_bytree'] = cs
         xgb_config['subsample'] = ss
-        xgb_config['max_depth'] = 8
+        xgb_config['max_depth'] = xgb_config.get('max_depth', 5)
         xgb_config['learning_rate'] = 0.03
         xgb_config['min_child_weight'] = 10
         xgb_config['n_estimators'] = QUICK_ESTIMATORS

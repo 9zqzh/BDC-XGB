@@ -1,129 +1,168 @@
 """
-超参数搜索脚本（Optuna 贝叶斯优化）
-搜索空间：top5_weight ∈ [1.0, 5.0], num_layers ∈ [2, 4]
-每个 trial 跑 15 个 epoch（含早停），结果保存到 model/60_158+39/optuna_search/
+Optuna 贝叶斯超参数搜索（XGBRanker 版）
+搜索 8 个关键超参数，25 trials，每 trial 用 n_estimators=200+early_stopping=20 快速评估。
 
-用法：uv run python code/src/optuna_search.py  [--n_trials 20]
+用法：uv run python code/src/optuna_search.py [--n_trials 25]
+输出：model/60_158+39/optuna_search/optuna_result.json
 """
-import os
-import sys
-import copy
-import argparse
-import multiprocessing as mp
-import json
-
-import pandas as pd
-import torch
+import os, sys, copy, json, argparse, gc, warnings, multiprocessing as mp
+import numpy as np, pandas as pd
 import optuna
-from tensorboardX import SummaryWriter
 
-from config import config, config_extended, early_stop_config
-from train import set_seed, train_one_window, split_train_val_by_last_month
+warnings.filterwarnings('ignore')
+sys.path.insert(0, os.path.dirname(__file__))
+
+from config import config, config_extended, xgb_config
+from train import (
+    set_seed, train_one_window,
+    preprocess_data, preprocess_val_data,
+    _merge_fundamentals, flatten_sequences_to_xgb,
+    _continuous_labels_to_ranks,
+    feature_columns_map,
+)
+from sklearn.preprocessing import StandardScaler
 
 
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--n_trials', type=int, default=20, help='Optuna 搜索 trial 数')
-    parser.add_argument('--quick_epochs', type=int, default=15, help='每个 trial 的 epoch 数')
-    return parser.parse_args()
+def quick_train_and_eval(trial_params):
+    """快速训练+评估，返回 final_score。不保存模型文件。"""
+    import xgboost as xgb
+
+    cfg = copy.deepcopy(config)
+    seq_len = cfg['sequence_length']
+    feat_name = cfg['feature_num']
+    features_list = list(feature_columns_map[feat_name])
+
+    # 加载数据
+    data_path = cfg['data_path']
+    full_df = pd.read_csv(os.path.join(data_path, 'train.csv'),
+                          dtype={'股票代码': str}, low_memory=False)
+    full_df['日期'] = pd.to_datetime(full_df['日期'])
+
+    from train import split_train_val_by_last_month
+    train_df, val_df, val_start = split_train_val_by_last_month(
+        full_df, seq_len, val_months=config_extended.get('val_months', 12)
+    )
+
+    all_sids = sorted(full_df['股票代码'].unique())
+    stockid2idx = {s: i for i, s in enumerate(all_sids)}
+
+    # 特征工程
+    train_data, _ = preprocess_data(train_df, is_train=True, stockid2idx=stockid2idx)
+    val_data, _ = preprocess_val_data(val_df, stockid2idx=stockid2idx)
+
+    scaler = StandardScaler()
+    for col_set in [train_data, val_data]:
+        col_set[features_list] = col_set[features_list].replace([np.inf, -np.inf], np.nan)
+    train_data = train_data.dropna(subset=features_list)
+    val_data = val_data.dropna(subset=features_list)
+    if len(train_data) == 0 or len(val_data) == 0:
+        return -999.0
+    train_data[features_list] = scaler.fit_transform(train_data[features_list])
+    val_data[features_list] = scaler.transform(val_data[features_list])
+
+    fp = os.path.join(data_path, 'history_factors_nan.csv')
+    if not os.path.exists(fp):
+        fp = os.path.join(data_path, 'hs300_fundamentals.csv')
+    train_data, fund_cols = _merge_fundamentals(train_data, fp)
+    if fund_cols:
+        val_data, _ = _merge_fundamentals(val_data, fp)
+        features_list = features_list + fund_cols
+
+    if cfg.get('selected_features'):
+        features_list = [f for f in cfg['selected_features'] if f in features_list]
+
+    X_train, y_train_cont, qid_train, _, _, _ = flatten_sequences_to_xgb(train_data, features_list, seq_len)
+    X_val, y_val_cont, qid_val, _, _, valid_val_dates = flatten_sequences_to_xgb(val_data, features_list, seq_len)
+
+    if len(X_train) == 0 or len(X_val) == 0:
+        return -999.0
+
+    y_train = _continuous_labels_to_ranks(y_train_cont, qid_train)
+    y_val = _continuous_labels_to_ranks(y_val_cont, qid_val)
+
+    xgb_params = {
+        'max_depth': trial_params['max_depth'],
+        'learning_rate': trial_params['learning_rate'],
+        'n_estimators': 200,
+        'subsample': trial_params['subsample'],
+        'colsample_bytree': trial_params['colsample_bytree'],
+        'reg_alpha': trial_params['reg_alpha'],
+        'reg_lambda': trial_params['reg_lambda'],
+        'min_child_weight': trial_params['min_child_weight'],
+        'objective': xgb_config['objective'],
+        'eval_metric': xgb_config['eval_metric'],
+        'ndcg_exp_gain': False,
+        'verbosity': 0,
+        'n_jobs': xgb_config['n_jobs'],
+        'tree_method': 'hist',
+        'random_state': 42,
+    }
+
+    model = xgb.XGBRanker(**xgb_params)
+    model.fit(X_train, y_train, qid=qid_train,
+              eval_set=[(X_val, y_val)], eval_qid=[qid_val],
+              verbose=False)
+
+    preds = model.predict(X_val)
+    daily_fs = []
+    K_TOP, MIN_GAP = 5, 0.005
+    for q in sorted(set(qid_val)):
+        mask = qid_val == q
+        dp, dl = preds[mask].astype(np.float64), y_val_cont[mask].astype(np.float64)
+        n_st = len(dp)
+        if n_st < K_TOP: continue
+        tti = np.argsort(dl)[::-1][:K_TOP]
+        ms, rs = dl[tti].sum(), K_TOP * dl.mean()
+        gap = ms - rs
+        if abs(gap) < MIN_GAP: continue
+        tki = np.argsort(dp)[::-1][:K_TOP]
+        ps = dl[tki].sum()
+        daily_fs.append((ps - rs) / (gap + 1e-12))
+
+    del X_train, X_val, model; gc.collect()
+    return np.mean(daily_fs) if daily_fs else -999.0
 
 
-class OptunaObjective:
-    def __init__(self, train_df, val_df, val_start, stockid2idx, num_stocks, device, search_dir, quick_epochs):
-        self.train_df = train_df
-        self.val_df = val_df
-        self.val_start = val_start
-        self.stockid2idx = stockid2idx
-        self.num_stocks = num_stocks
-        self.device = device
-        self.search_dir = search_dir
-        self.quick_epochs = quick_epochs
-        self.trial_counter = 0
-
-    def __call__(self, trial: optuna.Trial) -> float:
-        cfg = copy.deepcopy(config)
-        cfg['num_epochs'] = self.quick_epochs
-        cfg['top5_weight'] = trial.suggest_float('top5_weight', 1.0, 5.0, step=0.5)
-        cfg['num_layers'] = trial.suggest_int('num_layers', 2, 4)
-        cfg['learning_rate'] = trial.suggest_categorical('learning_rate', [3e-5, 1e-5, 5e-6])
-
-        self.trial_counter += 1
-        trial_dir = os.path.join(self.search_dir, f'trial_{self.trial_counter:03d}')
-        cfg['output_dir'] = trial_dir
-        os.makedirs(trial_dir, exist_ok=True)
-
-        writer = SummaryWriter(log_dir=os.path.join(trial_dir, 'log'))
-
-        try:
-            best_score, _ = train_one_window(
-                self.train_df, self.val_df, self.val_start,
-                self.stockid2idx, self.num_stocks,
-                cfg, self.device, writer, trial_dir
-            )
-            trial.set_user_attr('top5_weight', cfg['top5_weight'])
-            trial.set_user_attr('num_layers', cfg['num_layers'])
-            trial.set_user_attr('learning_rate', cfg['learning_rate'])
-        except Exception as e:
-            print(f"  Trial {self.trial_counter} FAILED: {e}")
-            best_score = -999.0
-        finally:
-            writer.close()
-
-        return best_score
+def objective(trial):
+    params = {
+        'max_depth': trial.suggest_int('max_depth', 4, 7),
+        'learning_rate': trial.suggest_float('learning_rate', 0.01, 0.1, log=True),
+        'subsample': trial.suggest_float('subsample', 0.4, 0.8),
+        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.2, 0.5),
+        'reg_alpha': trial.suggest_float('reg_alpha', 0.1, 10.0, log=True),
+        'reg_lambda': trial.suggest_float('reg_lambda', 0.1, 20.0, log=True),
+        'min_child_weight': trial.suggest_int('min_child_weight', 1, 30),
+    }
+    return quick_train_and_eval(params)
 
 
 def main():
-    args = parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--n_trials', type=int, default=25)
+    args = parser.parse_args()
     set_seed(42)
-
-    device = torch.device('cuda' if torch.cuda.is_available()
-                          else 'mps' if torch.backends.mps.is_available()
-                          else 'cpu')
 
     search_dir = os.path.join(config['output_dir'], 'optuna_search')
     os.makedirs(search_dir, exist_ok=True)
 
-    # 数据加载
-    full_df = pd.read_csv(os.path.join(config['data_path'], 'train.csv'),
-                          dtype={'股票代码': str}, low_memory=False)
-    full_df['日期'] = pd.to_datetime(full_df['日期'])
-    train_df, val_df, val_start = split_train_val_by_last_month(
-        full_df, config['sequence_length'],
-        val_months=config_extended.get('val_months', 6)
-    )
-    all_stock_ids = full_df['股票代码'].unique()
-    stockid2idx = {sid: idx for idx, sid in enumerate(sorted(all_stock_ids))}
-    num_stocks = len(stockid2idx)
-
     print(f"\n{'='*60}")
-    print(f"  Optuna 超参数搜索: {args.n_trials} trials × {args.quick_epochs} epochs")
-    print(f"  搜索空间: top5_weight=[1.0,5.0], num_layers=[2,4], lr={{3e-5,1e-5,5e-6}}")
+    print(f"  Optuna 贝叶斯搜索 (XGBRanker): {args.n_trials} trials")
+    print(f"  搜索空间: max_depth[4-7], lr[0.01-0.1], subsample[0.4-0.8]")
+    print(f"           colsample[0.2-0.5], alpha[0.1-10], lambda[0.1-20], min_child[1-30]")
     print(f"{'='*60}")
-
-    objective = OptunaObjective(train_df, val_df, val_start, stockid2idx, num_stocks,
-                                device, search_dir, args.quick_epochs)
 
     study = optuna.create_study(
         direction='maximize',
         sampler=optuna.samplers.TPESampler(seed=42),
-        pruner=optuna.pruners.MedianPruner(n_warmup_steps=5),
     )
     study.optimize(objective, n_trials=args.n_trials, show_progress_bar=True)
 
-    # ── 结果 ──
     print(f"\n{'='*60}")
-    print(f"  Optuna 搜索结果")
+    print(f"  最佳结果")
     print(f"{'='*60}")
-    print(f"  最佳 trial: #{study.best_trial.number}")
-    print(f"  最佳 final_score: {study.best_value:.6f}")
-    print(f"  最佳参数: {study.best_params}")
+    print(f"  Trial #{study.best_trial.number}: final_score={study.best_value:.6f}")
+    print(f"  最佳参数: {json.dumps(study.best_params, indent=4)}")
 
-    print(f"\n  Top 5 trials:")
-    for t in study.trials[:5]:
-        if t.value is not None:
-            print(f"    #{t.number:3d}  score={t.value:.6f}  params={t.params}")
-
-    # 保存
     result = {
         'best_trial': study.best_trial.number,
         'best_value': study.best_value,
@@ -136,5 +175,5 @@ def main():
 
 
 if __name__ == '__main__':
-    mp.set_start_method('spawn', force=True)
+    mp.freeze_support()
     main()
