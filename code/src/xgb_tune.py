@@ -11,6 +11,7 @@ import os
 import sys
 import json
 import copy
+import argparse
 import itertools
 import multiprocessing as mp
 
@@ -20,6 +21,7 @@ import numpy as np
 from config import config, config_extended, xgb_config
 from train import (
     set_seed, train_one_window, split_train_val_by_last_month,
+    _probe_xgb_cuda,
 )
 
 # 搜索空间（基于前序搜索结果，聚焦 colsample 精调）
@@ -33,6 +35,31 @@ QUICK_EARLY_STOP = 20
 
 
 def main():
+    parser = argparse.ArgumentParser(description='XGBRanker 超参数网格搜索')
+    parser.add_argument('--device', choices=['cpu', 'cuda', 'gpu', 'auto'], default='cpu',
+                        help='训练设备；cuda/gpu 使用 GPU，auto 自动检测（默认: cpu）')
+    parser.add_argument('--gpu-id', type=int, default=0, help='GPU 编号（默认: 0）')
+    args = parser.parse_args()
+
+    # ── 解析设备 ──
+    if args.device in ('cuda', 'gpu'):
+        device = _probe_xgb_cuda(f'cuda:{args.gpu_id}')
+        print(f'运行模式: GPU ({device})')
+    elif args.device == 'auto':
+        try:
+            device = _probe_xgb_cuda(f'cuda:{args.gpu_id}')
+            print(f'运行模式: GPU ({device})')
+        except RuntimeError:
+            device = 'cpu'
+            print('运行模式: CPU（GPU 不可用，自动回退）')
+    else:
+        device = 'cpu'
+        print('运行模式: CPU')
+    runtime = {'device': device, 'gpu_id': args.gpu_id if device.startswith('cuda') else None,
+               'n_jobs': 8 if device.startswith('cuda') else None,
+               'max_bin': 128 if device.startswith('cuda') else None,
+               'feature_workers': 6}
+
     set_seed(42)
 
     # 加载数据（复用 train.py 的划分逻辑）
@@ -81,7 +108,8 @@ def main():
         try:
             best_score, metrics = train_one_window(
                 train_df, val_df, val_start,
-                stockid2idx, num_stocks, cfg, trial_dir
+                stockid2idx, num_stocks, cfg, trial_dir,
+                runtime=runtime,
             )
             results.append({
                 'colsample': cs, 'subsample': ss,

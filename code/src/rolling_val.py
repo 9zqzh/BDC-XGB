@@ -42,6 +42,7 @@ from train import (
     flatten_sequences_to_xgb,
     _continuous_labels_to_ranks,
     feature_columns_map,
+    _probe_xgb_cuda,
 )
 
 # ── 滚动参数 ──
@@ -49,6 +50,7 @@ TRAIN_DAYS = 260       # 每次训练窗口（交易日）
 VAL_DAYS = 5           # 每次验证窗口（交易日）
 N_ROLLS = 50           # 总滚动次数
 STEP_DAYS = 5          # 向前滚动步长（交易日）
+DEVICE = 'cpu'          # XGBoost 设备，由 CLI --device 覆盖
 
 
 def _spearman_numpy(a, b):
@@ -241,6 +243,8 @@ def run_single_roll(train_df, val_df, val_dates, stockid2idx, roll_idx, config_o
         'tree_method': 'hist',
         'random_state': 42 + roll_idx,
     }
+    if DEVICE.startswith('cuda'):
+        xgb_params['device'] = DEVICE
 
     model = xgb.XGBRanker(**xgb_params)
     model.fit(
@@ -707,7 +711,24 @@ if __name__ == '__main__':
     parser.add_argument('--v3_vs_ic', action='store_true', help='v3 vs IC124')
     parser.add_argument('--cross_vs_nocross', action='store_true', help='cross vs no-cross')
     parser.add_argument('--n_rolls', type=int, default=N_ROLLS, help=f'滚动次数 (默认{N_ROLLS})')
+    parser.add_argument('--device', choices=['cpu', 'cuda', 'gpu', 'auto'], default='cpu',
+                        help='训练设备；cuda/gpu 使用 GPU，auto 自动检测（默认: cpu）')
+    parser.add_argument('--gpu-id', type=int, default=0, help='GPU 编号（默认: 0）')
     args = parser.parse_args()
+
+    # ── 解析设备 ──
+    if args.device in ('cuda', 'gpu'):
+        DEVICE = _probe_xgb_cuda(f'cuda:{args.gpu_id}')
+        print(f'运行模式: GPU ({DEVICE})')
+    elif args.device == 'auto':
+        try:
+            DEVICE = _probe_xgb_cuda(f'cuda:{args.gpu_id}')
+            print(f'运行模式: GPU ({DEVICE})')
+        except RuntimeError:
+            DEVICE = 'cpu'
+            print('运行模式: CPU（GPU 不可用，自动回退）')
+    else:
+        print('运行模式: CPU')
 
     if args.n_rolls != N_ROLLS:
         import builtins

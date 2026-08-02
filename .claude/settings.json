@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(taskkill //F //IM python.exe)",
+      "Bash(rm c:/Users/cghr/Desktop/big-data-contest/BDC-XGB/model/60_158+39/tmp*.dat)"
+    ]
+  }
+}

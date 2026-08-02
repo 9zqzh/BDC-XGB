@@ -2,11 +2,11 @@
 ========================================================
            扩展评估报告 (Extended Evaluation Report)
 ========================================================
-  Final Score:           0.005549
-  TopK Hit Rate:         0.031285
-  Spearman Rho:          0.037210
-  Win Rate:              0.486034
-  FS Std Dev:            0.037424
+  Final Score:           0.000024
+  TopK Hit Rate:         0.017877
+  Spearman Rho:          0.036308
+  Win Rate:              0.519553
+  FS Std Dev:            0.035868
   Valid Days Ratio:      1.000000
   Valid Days:                 179
   Total Days:                 179

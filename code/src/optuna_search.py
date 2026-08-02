@@ -19,8 +19,11 @@ from train import (
     _merge_fundamentals, flatten_sequences_to_xgb,
     _continuous_labels_to_ranks,
     feature_columns_map,
+    _probe_xgb_cuda,
 )
 from sklearn.preprocessing import StandardScaler
+
+DEVICE = 'cpu'  # XGBoost 设备，由 CLI --device 覆盖
 
 
 def quick_train_and_eval(trial_params):
@@ -97,6 +100,8 @@ def quick_train_and_eval(trial_params):
         'tree_method': 'hist',
         'random_state': 42,
     }
+    if DEVICE.startswith('cuda'):
+        xgb_params['device'] = DEVICE
 
     model = xgb.XGBRanker(**xgb_params)
     model.fit(X_train, y_train, qid=qid_train,
@@ -139,7 +144,26 @@ def objective(trial):
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--n_trials', type=int, default=25)
+    parser.add_argument('--device', choices=['cpu', 'cuda', 'gpu', 'auto'], default='cpu',
+                        help='训练设备；cuda/gpu 使用 GPU，auto 自动检测（默认: cpu）')
+    parser.add_argument('--gpu-id', type=int, default=0, help='GPU 编号（默认: 0）')
     args = parser.parse_args()
+
+    # ── 解析设备 ──
+    global DEVICE
+    if args.device in ('cuda', 'gpu'):
+        DEVICE = _probe_xgb_cuda(f'cuda:{args.gpu_id}')
+        print(f'运行模式: GPU ({DEVICE})')
+    elif args.device == 'auto':
+        try:
+            DEVICE = _probe_xgb_cuda(f'cuda:{args.gpu_id}')
+            print(f'运行模式: GPU ({DEVICE})')
+        except RuntimeError:
+            DEVICE = 'cpu'
+            print('运行模式: CPU（GPU 不可用，自动回退）')
+    else:
+        print('运行模式: CPU')
+
     set_seed(42)
 
     search_dir = os.path.join(config['output_dir'], 'optuna_search')

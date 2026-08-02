@@ -16,7 +16,7 @@ import numpy as np
 import pandas as pd
 
 from config import config, config_extended
-from train import set_seed, train_one_window
+from train import set_seed, train_one_window, _probe_xgb_cuda
 
 
 def parse_args():
@@ -25,10 +25,13 @@ def parse_args():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--output_dir', type=str, default=None)
     parser.add_argument('--cross_vs_nocross', action='store_true', help='cross vs no-cross 4-window')
+    parser.add_argument('--device', choices=['cpu', 'cuda', 'gpu', 'auto'], default='cpu',
+                        help='训练设备；cuda/gpu 使用 GPU，auto 自动检测（默认: cpu）')
+    parser.add_argument('--gpu-id', type=int, default=0, help='GPU 编号（默认: 0）')
     return parser.parse_args()
 
 
-def run_cross_validation(windows, config, base_output_dir=None):
+def run_cross_validation(windows, config, base_output_dir=None, runtime=None):
     """对每个窗口调用 XGBRanker 训练+评估。"""
     data_path = config['data_path']
     full_df = pd.read_csv(os.path.join(data_path, 'train.csv'))
@@ -75,7 +78,8 @@ def run_cross_validation(windows, config, base_output_dir=None):
         try:
             best_score, best_extended_metrics = train_one_window(
                 window_train_df, window_val_df, val_start_ts,
-                stockid2idx, num_stocks, config, window_output_dir
+                stockid2idx, num_stocks, config, window_output_dir,
+                runtime=runtime,
             )
 
             result = {
@@ -218,7 +222,7 @@ def generate_summary_report(all_results, output_path):
     with open(output_path, 'w', encoding='utf-8') as f:
         f.write(report)
     return report
-def compare_cross_vs_nocross():
+def compare_cross_vs_nocross(runtime=None):
     """
     P2交叉特征四窗口 A/B 对比：含交叉 vs 不含交叉
     """
@@ -241,12 +245,11 @@ def compare_cross_vs_nocross():
     base_features = [f for f in config.get('selected_features', []) if f not in CROSS_FEATURES]
     config['selected_features'] = base_features + CROSS_FEATURES
     print(f"\n[A组] 含交叉特征（{len(config['selected_features'])} 因子）...")
-    results_a = run_cross_validation(windows, config, config['output_dir'] + '/cross_val_A')
-
+    results_a = run_cross_validation(windows, config, config['output_dir'] + '/cross_val_A', runtime=runtime)
     # B组: 无交叉
     config['selected_features'] = base_features
     print(f"\n[B组] 纯IC124基线（{len(base_features)} 因子）...")
-    results_b = run_cross_validation(windows, config, config['output_dir'] + '/cross_val_B')
+    results_b = run_cross_validation(windows, config, config['output_dir'] + '/cross_val_B', runtime=runtime)
 
     # 对比
     valid_a = [r for r in results_a if 'error' not in r]
@@ -275,6 +278,25 @@ def main():
     args = parse_args()
     set_seed(args.seed)
 
+    # ── 解析设备 ──
+    if args.device in ('cuda', 'gpu'):
+        device = _probe_xgb_cuda(f'cuda:{args.gpu_id}')
+        print(f'运行模式: GPU ({device})')
+    elif args.device == 'auto':
+        try:
+            device = _probe_xgb_cuda(f'cuda:{args.gpu_id}')
+            print(f'运行模式: GPU ({device})')
+        except RuntimeError:
+            device = 'cpu'
+            print('运行模式: CPU（GPU 不可用，自动回退）')
+    else:
+        device = 'cpu'
+        print('运行模式: CPU')
+    runtime = {'device': device, 'gpu_id': args.gpu_id if device.startswith('cuda') else None,
+               'n_jobs': 8 if device.startswith('cuda') else None,
+               'max_bin': 128 if device.startswith('cuda') else None,
+               'feature_workers': 6}
+
     windows = config_extended.get('cross_val_windows', [])
     if not windows:
         print("错误: config_extended 中没有定义 cross_val_windows")
@@ -285,13 +307,13 @@ def main():
     os.makedirs(base_output_dir, exist_ok=True)
 
     if args.cross_vs_nocross:
-        compare_cross_vs_nocross()
+        compare_cross_vs_nocross(runtime=runtime)
         return
 
     print(f"将执行 {len(windows)} 个窗口的交叉验证 (XGBRanker)")
     print(f"输出目录: {base_output_dir}")
 
-    all_results = run_cross_validation(windows, config, base_output_dir)
+    all_results = run_cross_validation(windows, config, base_output_dir, runtime=runtime)
     report_path = os.path.join(base_output_dir, 'cross_val_report.txt')
     generate_summary_report(all_results, report_path)
     print(f"\n汇总报告已保存到: {report_path}")

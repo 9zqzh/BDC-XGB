@@ -1,1 +1,1 @@
-Best final_score: 0.000685
+Best final_score: -0.002533
