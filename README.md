@@ -152,7 +152,31 @@ sh train.sh
 Windows 可直接运行：
 
 ```powershell
-python code/src/train.py
+uv run python code/src/train.py
+```
+
+Windows + NVIDIA GPU 训练（推荐 8GB 显存配置）：
+
+```powershell
+uv run python code/src/train.py --device cuda --gpu-id 0
+```
+
+如果机器上同时有多张 NVIDIA 显卡，先用 `nvidia-smi -L` 查看编号，再把 `--gpu-id` 改为对应编号。例如使用第二张卡：
+
+```powershell
+uv run python code/src/train.py --device cuda --gpu-id 1
+```
+
+本项目的 GPU 模式使用 XGBoost CUDA；默认 `max_bin=128`、XGBoost CPU 线程数为 8、特征工程进程数为 6，适配 8GB 显存和 16GB 内存。也可以显式调整：
+
+```powershell
+uv run python code/src/train.py --device cuda --gpu-id 0 --n-jobs 6 --feature-workers 4
+```
+
+`--device cuda` 会在训练开始前检查 CUDA 是否真正可用；如果驱动、CUDA 或 GPU 编号不正确，程序会直接给出错误。需要自动选择时可使用：
+
+```powershell
+uv run python code/src/train.py --device auto
 ```
 
 4) 生成预测结果
@@ -193,7 +217,7 @@ python code/src/cross_val.py
 
 3) 是否使用 GPU
 
-当前主模型是 `XGBRanker`，配置中使用 `tree_method='hist'`，不是 PyTorch GPU 训练链路。
+主模型是 `XGBRanker`。CPU 和 GPU 都使用 `tree_method='hist'`；GPU 命令会额外设置 `device='cuda:<gpu-id>'`。LightGBM 方向分类器仍使用 CPU，主排序模型使用 GPU。
 
 4) 超参搜索磁盘占用
 

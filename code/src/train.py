@@ -8,7 +8,9 @@ XGBRanker 排序学习训练脚本
 import os
 import json
 import random
+import argparse
 import multiprocessing as mp
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -70,6 +72,109 @@ feature_engineer_func_map = {
 }
 
 
+# 运行时资源选项。特征工程在主进程中创建 worker pool，GPU 训练时默认
+# 降低 worker 数，避免 16GB 内存机器出现 CPU/RAM 过度竞争。
+RUNTIME_OPTIONS = {
+    'feature_workers': 6,
+}
+
+
+def _probe_xgb_cuda(device):
+    """验证 XGBoost CUDA 构建和指定 GPU 是否真正可用。"""
+    build_info = xgb.build_info()
+    if not build_info.get('USE_CUDA', False):
+        raise RuntimeError(
+            '当前 XGBoost 不是 CUDA 构建，请安装支持 CUDA 的 xgboost wheel。'
+        )
+
+    probe_X = np.array([[0.0], [1.0]], dtype=np.float32)
+    probe_y = np.array([0.0, 1.0], dtype=np.float32)
+    probe_dmatrix = xgb.DMatrix(probe_X, label=probe_y)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        probe_model = xgb.train(
+            {
+                'objective': 'reg:squarederror',
+                'tree_method': 'hist',
+                'device': device,
+            },
+            probe_dmatrix,
+            num_boost_round=1,
+        )
+
+    saved_config = json.loads(probe_model.save_config())
+    actual_device = saved_config['learner']['generic_param']['device']
+    if not actual_device.startswith('cuda'):
+        raise RuntimeError(
+            f'未检测到可用 GPU（请求 {device}，实际为 {actual_device}）。'
+            '请确认 NVIDIA 驱动、CUDA 运行库和 GPU 编号。'
+        )
+    return actual_device
+
+
+def _resolve_runtime(args):
+    """解析 CPU/GPU 模式，并在显式 GPU 模式下拒绝静默回退。"""
+    requested = args.device.lower()
+    gpu_device = f'cuda:{args.gpu_id}'
+
+    if requested in {'cuda', 'gpu'}:
+        actual_device = _probe_xgb_cuda(gpu_device)
+    elif requested == 'auto':
+        try:
+            actual_device = _probe_xgb_cuda(gpu_device)
+            print(f'运行模式: GPU ({actual_device})')
+        except RuntimeError as exc:
+            actual_device = 'cpu'
+            print(f'运行模式: CPU（GPU 不可用，自动回退: {exc}）')
+    else:
+        actual_device = 'cpu'
+        print('运行模式: CPU')
+
+    is_gpu = actual_device.startswith('cuda')
+    return {
+        'device': actual_device,
+        'gpu_id': args.gpu_id if is_gpu else None,
+        'n_jobs': args.n_jobs if args.n_jobs is not None else (8 if is_gpu else xgb_config['n_jobs']),
+        'max_bin': args.max_bin if args.max_bin is not None else (128 if is_gpu else None),
+        'feature_workers': args.feature_workers,
+    }
+
+
+def _parse_runtime_args():
+    parser = argparse.ArgumentParser(description='训练 XGBRanker 模型')
+    parser.add_argument(
+        '--device',
+        choices=['cpu', 'cuda', 'gpu', 'auto'],
+        default='cpu',
+        help='训练设备；cuda/gpu 显式使用 GPU，auto 可用时使用 GPU（默认: cpu）',
+    )
+    parser.add_argument(
+        '--gpu-id',
+        type=int,
+        default=0,
+        help='使用的 NVIDIA GPU 编号（默认: 0）',
+    )
+    parser.add_argument(
+        '--n-jobs',
+        type=int,
+        default=None,
+        help='XGBoost CPU 线程数；GPU 模式默认 8，CPU 模式默认使用配置值',
+    )
+    parser.add_argument(
+        '--max-bin',
+        type=int,
+        default=None,
+        help='XGBoost histogram bin 数；GPU 模式默认 128 以降低显存占用',
+    )
+    parser.add_argument(
+        '--feature-workers',
+        type=int,
+        default=6,
+        help='特征工程进程数；16GB 内存机器建议 6（默认: 6）',
+    )
+    return parser.parse_args()
+
+
 def set_seed(seed=42):
     random.seed(seed)
     np.random.seed(seed)
@@ -118,7 +223,7 @@ def _preprocess_common(df, stockid2idx, desc, drop_small_open=True):
     if len(groups) == 0:
         raise ValueError(f"{desc}输入为空，无法继续")
 
-    num_processes = min(10, mp.cpu_count())
+    num_processes = min(RUNTIME_OPTIONS['feature_workers'], mp.cpu_count())
     with mp.Pool(processes=num_processes) as pool:
         processed_list = list(tqdm(pool.imap(feature_engineer, groups), total=len(groups), desc=desc))
 
@@ -667,7 +772,16 @@ def evaluate_xgb_model(model, X_val, y_val, qid_val, valid_dates, val_df, featur
 #  单窗口训练函数（XGBRanker）
 # ============================================================
 
-def train_one_window(train_df, val_df, val_start, stockid2idx, num_stocks, config, output_dir):
+def train_one_window(
+    train_df,
+    val_df,
+    val_start,
+    stockid2idx,
+    num_stocks,
+    config,
+    output_dir,
+    runtime=None,
+):
     """
     XGBRanker 单窗口训练 + 评估。
 
@@ -684,6 +798,14 @@ def train_one_window(train_df, val_df, val_start, stockid2idx, num_stocks, confi
         best_score, extended_metrics
     """
     sequence_length = config['sequence_length']
+    runtime = runtime or {
+        'device': 'cpu',
+        'gpu_id': None,
+        'n_jobs': xgb_config['n_jobs'],
+        'max_bin': None,
+        'feature_workers': RUNTIME_OPTIONS['feature_workers'],
+    }
+    RUNTIME_OPTIONS['feature_workers'] = runtime['feature_workers']
     features_list = feature_columns_map[config['feature_num']]
     flatten_days = config.get('xgb_flatten_days', 10)
 
@@ -777,14 +899,20 @@ def train_one_window(train_df, val_df, val_start, stockid2idx, num_stocks, confi
         'eval_metric': xgb_config['eval_metric'],
         'ndcg_exp_gain': False,                         # 禁用指数增益（标签>31时必需）
         'verbosity': xgb_config['verbosity'],
-        'n_jobs': xgb_config['n_jobs'],
+        'n_jobs': runtime['n_jobs'],
         'tree_method': 'hist',
         'random_state': 42,
     }
+    if runtime['device'].startswith('cuda'):
+        xgb_params['device'] = runtime['device']
+        xgb_params['max_bin'] = runtime['max_bin']
 
     model = xgb.XGBRanker(**xgb_params)
 
-    print("\n开始训练 XGBRanker ...")
+    print(
+        f"\n开始训练 XGBRanker（device={runtime['device']}, "
+        f"n_jobs={runtime['n_jobs']}, max_bin={runtime['max_bin'] or 256}）..."
+    )
     model.fit(
         X_train, y_train,
         qid=qid_train,
@@ -824,8 +952,13 @@ def train_one_window(train_df, val_df, val_start, stockid2idx, num_stocks, confi
     with open(os.path.join(output_dir, 'final_score.txt'), 'w') as f:
         f.write(f"Best final_score: {best_score:.6f}\n")
 
-    with open(os.path.join(output_dir, 'config.json'), 'w') as f:
-        json.dump({**config, **xgb_config}, f, indent=4, ensure_ascii=False)
+    with open(os.path.join(output_dir, 'config.json'), 'w', encoding='utf-8') as f:
+        json.dump(
+            {**config, **xgb_config, 'runtime': runtime},
+            f,
+            indent=4,
+            ensure_ascii=False,
+        )
 
     print(f"\n模型已保存到: {model_path}")
     print(f"验证集最终得分 (final_score): {best_score:.6f}")
@@ -842,8 +975,10 @@ def train_one_window(train_df, val_df, val_start, stockid2idx, num_stocks, confi
 #  主程序
 # ============================================================
 
-def main():
+def main(runtime=None):
     set_seed(42)
+    if runtime is not None:
+        RUNTIME_OPTIONS['feature_workers'] = runtime['feature_workers']
     output_dir = config['output_dir']
     os.makedirs(output_dir, exist_ok=True)
 
@@ -865,7 +1000,14 @@ def main():
     print(f"验证集范围: {val_df['日期'].min()} 到 {val_df['日期'].max()}")
 
     best_score, best_extended_metrics = train_one_window(
-        train_df, val_df, val_start, stockid2idx, num_stocks, config, output_dir
+        train_df,
+        val_df,
+        val_start,
+        stockid2idx,
+        num_stocks,
+        config,
+        output_dir,
+        runtime=runtime,
     )
 
     print(f"\n{'#'*50}")
@@ -876,4 +1018,4 @@ def main():
 
 if __name__ == "__main__":
     mp.set_start_method('spawn', force=True)
-    main()
+    main(_resolve_runtime(_parse_runtime_args()))

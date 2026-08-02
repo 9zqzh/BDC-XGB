@@ -40,4 +40,4 @@ code/src/lr_search.py
 code/src/optuna_search.py
 
 analys_docs
-data/raw_cache
+data/raw_cache/
