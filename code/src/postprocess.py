@@ -63,6 +63,10 @@ def confidence_aware_postprocess(scores, stock_codes, top_k=5, params=None):
     shifted = selected_scores - selected_scores.max()
     exp_scores = np.exp(shifted / safe_temp)
     weights = (exp_scores / exp_scores.sum()).tolist()
+    # 修正浮点舍入误差：保证 sum(weights) 精确等于 1.0
+    # IEEE 754 下 5 次独立除法的舍入漂移可能使求和 = 1.0000000000000002
+    if len(weights) > 1:
+        weights[-1] = 1.0 - sum(weights[:-1])
 
     # ── Step 3: 置信度 gap（保持向后兼容，供已有分析脚本参考） ──
     sorted_scores = np.sort(scores)[::-1]
