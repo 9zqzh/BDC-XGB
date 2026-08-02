@@ -45,6 +45,11 @@ config = {
         '行业_家用电器', '行业_有色钢铁', '行业_机械设备', '行业_汽车',
         '行业_消费零售', '行业_电力新能源', '行业_电子', '行业_综合',
         '行业_能源', '行业_计算机', '行业_通信', '行业_金融', '行业_食品饮料',
+        # P2 动量交叉特征（9个，IC 通过率 9/10）
+        'cross_MA60_SUMN60', 'cross_MA60_ROC60', 'cross_MA60_ROC30',
+        'cross_SUMN60_ROC60', 'cross_SUMN30_ROC60',
+        'cross_MA60_MA30', 'cross_ROC30_MA30',
+        'cross_vol_price_div', 'cross_liq_adj_ret',
         # P1 方向分类器特征
         'direction_proba',
     ],
