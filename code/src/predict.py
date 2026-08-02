@@ -117,9 +117,18 @@ def main():
         raise ValueError('没有可用于预测的股票序列')
 
     X_infer = np.array(rows, dtype=np.float32)
+    # ── P1 方向分类器：生成上涨概率辅助特征 ──
+    clf_path = os.path.join(config['output_dir'], 'direction_clf.pkl')
+    if os.path.exists(clf_path):
+        dir_clf = joblib.load(clf_path)
+        dir_proba = dir_clf.predict_proba(X_infer)[:, 1].astype(np.float32)
+        X_infer = np.column_stack([X_infer, dir_proba.reshape(-1, 1)])
+        print(f"方向分类器已加载，预测方向概率均值: {dir_proba.mean():.4f}")
+    else:
+        print("方向分类器未找到，跳过方向特征")
     scores = model.predict(X_infer)
 
-    # 置信度驱动的后处理（替代等权 Top5）
+    # TopK 选股 + softmax 赋权后处理
     selected_stocks, weights, conf_info = confidence_aware_postprocess(
         scores, stock_codes, top_k=5
     )
@@ -129,8 +138,9 @@ def main():
 
     print(f'预测日期: {latest_date.date()}')
     print(f'参与排序股票数(沪深300): {len(stock_codes)}')
-    print(f'置信度: gap={conf_info["confidence_gap"]:.3f}, '
-          f'选取{conf_info["n_selected"]}只, z阈值={conf_info["z_threshold_used"]:.1f}')
+    print(f'选股模式: {conf_info["method"]}, 选取{conf_info["n_selected"]}只, '
+          f'temperature={conf_info["temperature"]:.1f}, '
+          f'gap={conf_info["confidence_gap"]:.3f}')
     print(f'选中股票: {list(zip(selected_stocks, [f"{w:.4f}" for w in weights]))}')
     print(f'结果已写入: {output_path}')
 

@@ -573,10 +573,11 @@ def _continuous_labels_to_ranks(y, qid):
 def evaluate_xgb_model(model, X_val, y_val, qid_val, valid_dates, val_df, features,
                        scaler, sequence_length, k=5, min_gap=0.005):
     """
-    在验证集上使用自定义指标评估 XGBRanker。
-    步骤：按日期分组 → 对每组内的股票打分 → 计算 extended_metrics
+    在验证集上使用置信度驱动后处理评估 XGBRanker（与 predict.py 流程一致）。
+    步骤：按日期分组 → confidence_aware_postprocess 选股+赋权 → 计算 extended_metrics
     """
     import torch
+    from postprocess import confidence_aware_postprocess
     preds = model.predict(X_val)
 
     # 按 qid 分组，构建每日的 pred/true/mask
@@ -592,27 +593,37 @@ def evaluate_xgb_model(model, X_val, y_val, qid_val, valid_dates, val_df, featur
 
     for q in unique_qids:
         mask = qid_val == q
-        day_preds = torch.tensor(preds[mask], dtype=torch.float32)
-        day_labels = torch.tensor(y_val[mask], dtype=torch.float32)
-        n = len(day_preds)
+        day_preds_np = preds[mask].astype(np.float64)
+        day_labels_np = y_val[mask].astype(np.float64)
+        n = len(day_preds_np)
         if n < k:
             continue
         num_total += 1
 
-        # 按预测排序取 top k
-        _, topk_idx = torch.topk(day_preds, k)
-        topk_returns = day_labels[topk_idx]
-        pred_sum = topk_returns.sum().item()
-
-        _, true_topk_idx = torch.topk(day_labels, k)
-        max_sum = day_labels[true_topk_idx].sum().item()
-        random_sum = k * day_labels.mean().item()
-
+        # 真实 TopK 收益（作为 upper bound 参考）
+        true_topk_idx = np.argsort(day_labels_np)[::-1][:k]
+        max_sum = float(day_labels_np[true_topk_idx].sum())
+        random_sum = float(k * day_labels_np.mean())
         gap = max_sum - random_sum
         if abs(gap) < min_gap:
             continue
 
+        # ── 置信度驱动后处理（与 predict.py 流程一致） ──
+        day_stocks = [f"s{i}" for i in range(n)]
+        selected_stocks, weights, conf_info = confidence_aware_postprocess(
+            day_preds_np, day_stocks, top_k=k
+        )
+
+        if len(selected_stocks) == 0:
+            continue
+
         num_valid += 1
+
+        # 映射回真实 labels
+        selected_idx = np.array([int(s[1:]) for s in selected_stocks])
+        selected_labels = day_labels_np[selected_idx]
+        pred_sum = float(np.dot(weights, selected_labels))
+
         daily_metrics['pred_return_sum'].append(pred_sum)
         daily_metrics['max_return_sum'].append(max_sum)
         daily_metrics['random_return_sum'].append(random_sum)
@@ -620,17 +631,21 @@ def evaluate_xgb_model(model, X_val, y_val, qid_val, valid_dates, val_df, featur
         fs = (pred_sum - random_sum) / (gap + 1e-12) if abs(gap) > 1e-6 else 0.0
         daily_metrics['final_score'].append(fs)
 
-        # TopK 命中
-        true_set = set(true_topk_idx.numpy())
-        pred_set = set(topk_idx.numpy())
+        # TopK 命中：置信度选股 vs 真实 TopK
+        true_set = set(true_topk_idx)
+        pred_set = set(selected_idx)
         daily_metrics['topk_hit'].append(len(true_set & pred_set))
 
         # Spearman
         from evaluation import _spearman_rho_pytorch
-        daily_metrics['spearman'].append(_spearman_rho_pytorch(day_preds, day_labels))
+        day_preds_t = torch.tensor(day_preds_np, dtype=torch.float32)
+        day_labels_t = torch.tensor(day_labels_np, dtype=torch.float32)
+        daily_metrics['spearman'].append(_spearman_rho_pytorch(day_preds_t, day_labels_t))
 
-        # Win rate
-        daily_metrics['win'].append(1.0 if topk_returns.mean().item() > day_labels.mean().item() else 0.0)
+        # Win rate: 选股加权平均收益 > 市场等权平均
+        market_mean = float(day_labels_np.mean())
+        selected_mean = float(selected_labels.mean())
+        daily_metrics['win'].append(1.0 if selected_mean > market_mean else 0.0)
 
     n = num_valid
     metrics = {
@@ -714,6 +729,29 @@ def train_one_window(train_df, val_df, val_start, stockid2idx, num_stocks, confi
     # ── 标签转换：连续超额收益 → 整数排名（XGBRanker rank:pairwise 要求） ──
     y_train = _continuous_labels_to_ranks(y_train_cont, qid_train)
     y_val = _continuous_labels_to_ranks(y_val_cont, qid_val)
+
+    # ── P1 方向分类器：LightGBM OOF 生成上涨概率辅助特征 ──
+    try:
+        from direction_classifier import generate_direction_features, _make_classifier
+        print("训练方向分类器 (LightGBM OOF)...")
+        dir_proba_train, dir_model = generate_direction_features(
+            X_train, y_train_cont, qid_train
+        )
+        # 用全部训练数据拟合一个验证集推理模型
+        val_dir_clf = _make_classifier()
+        val_dir_clf.fit(X_train, (y_train_cont > 0).astype(int))
+        dir_proba_val = val_dir_clf.predict_proba(X_val)[:, 1].astype(np.float32)
+        train_acc = ((dir_proba_train > 0.5) == (y_train_cont > 0)).mean()
+        val_acc = ((dir_proba_val > 0.5) == (y_val_cont > 0)).mean()
+        print(f"方向分类器 训练准确率: {train_acc:.4f}, 验证准确率: {val_acc:.4f}")
+        X_train = np.column_stack([X_train, dir_proba_train.reshape(-1, 1)])
+        X_val = np.column_stack([X_val, dir_proba_val.reshape(-1, 1)])
+        # 保存方向分类器模型供 predict.py / cross_val 评估使用
+        joblib.dump(dir_model, os.path.join(output_dir, 'direction_clf.pkl'))
+    except Exception as e:
+        import traceback
+        print(f"  [警告] 方向分类器失败: {e}")
+        traceback.print_exc()
 
     # ── XGBRanker 按组的样本数 ──
     train_groups = [np.sum(qid_train == q) for q in sorted(set(qid_train))]

@@ -204,6 +204,24 @@ def run_single_roll(train_df, val_df, val_dates, stockid2idx, roll_idx, config_o
     # ── 6. 标签转换 ──
     y_train = _continuous_labels_to_ranks(y_train_cont, qid_train)
     y_val = _continuous_labels_to_ranks(y_val_cont, qid_val)
+    # ── P1 方向分类器：与 train.py 保持一致（OOF 上涨概率特征） ──
+    try:
+        from direction_classifier import generate_direction_features
+        print("  训练方向分类器 (LightGBM OOF)...")
+        dir_proba_train, _ = generate_direction_features(
+            X_train, y_train_cont, qid_train
+        )
+        from direction_classifier import _make_classifier
+        _dir_model = _make_classifier()
+        _dir_model.fit(X_train, (y_train_cont > 0).astype(int))
+        dir_proba_val = _dir_model.predict_proba(X_val)[:, 1].astype(np.float32)
+        X_train = np.column_stack([X_train, dir_proba_train.reshape(-1, 1)])
+        X_val = np.column_stack([X_val, dir_proba_val.reshape(-1, 1)])
+        print(f"  方向分类器生效: X_train={X_train.shape[1]}列, X_val={X_val.shape[1]}列")
+    except Exception as e:
+        import traceback
+        print(f"  [警告] 方向分类器失败: {e}")
+        traceback.print_exc()
 
     # ── 7. 训练 XGBRanker ──
     xgb_params = {
